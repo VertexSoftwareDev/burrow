@@ -65,6 +65,8 @@ enum Matcher {
         min_size: u64,
         /// Only these extensions, or any when empty.
         extensions: &'static [&'static str],
+        /// Whether to look inside subfolders at all.
+        deep: bool,
     },
 }
 
@@ -222,6 +224,9 @@ pub static RULES: &[Rule] = &[
             days: 90,
             min_size: 1,
             extensions: &["exe", "msi", "msix", "iso", "zip", "rar", "7z"],
+            // An installer sits in Downloads itself. A .zip three folders down
+            // is part of something that was unpacked there and is in use.
+            deep: false,
         },
     },
     Rule {
@@ -243,6 +248,7 @@ pub static RULES: &[Rule] = &[
             days: 365,
             min_size: 500 << 20,
             extensions: &[],
+            deep: true,
         },
     },
     Rule {
@@ -313,6 +319,7 @@ pub fn suggest(index: &Index, tree: &Tree, now: u64, profile: &str) -> Vec<Sugge
                 days,
                 min_size,
                 extensions,
+                deep,
             } => stale(
                 index,
                 tree,
@@ -320,6 +327,7 @@ pub fn suggest(index: &Index, tree: &Tree, now: u64, profile: &str) -> Vec<Sugge
                 now.saturating_sub(days * DAY),
                 *min_size,
                 extensions,
+                *deep,
             ),
         };
 
@@ -433,15 +441,23 @@ fn stale(
     before: u64,
     min_size: u64,
     extensions: &[&str],
+    deep: bool,
 ) -> Vec<NodeId> {
     let mut out = Vec::new();
     let mut stack: Vec<NodeId> = roots(index, tree, under).into_iter().collect();
     while let Some(node) = stack.pop() {
         for &child in tree.children(node) {
             if tree.is_dir(child) {
-                // Hidden application folders are not "files I forgot".
+                // Hidden application folders are not "files I forgot", and a
+                // folder with programs in it — a portable app, a game, an
+                // unpacked tool — is a whole thing whose parts must not be
+                // picked off one by one because they are old.
                 let name = index.name(child as usize);
-                if !name.eq_ignore_ascii_case("appdata") && !name.starts_with('.') {
+                if deep
+                    && !name.eq_ignore_ascii_case("appdata")
+                    && !name.starts_with('.')
+                    && !is_program_folder(index, tree, child)
+                {
                     stack.push(child);
                 }
                 continue;
@@ -591,10 +607,84 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_picked_out_of_an_unpacked_program() {
+        let old = NOW - 400 * DAY;
+        let index = index_from_specs(vec![
+            dir(20, ROOT_RECORD, "Users"),
+            dir(21, 20, "pc"),
+            dir(22, 21, "Downloads"),
+            // Ghidra, unpacked into Downloads: its zips are part of it, and
+            // it runs from .bat and .jar files, not an .exe.
+            dir(23, 22, "ghidra_11.4.2"),
+            file(24, 23, "ghidraRun.bat").sized(4096).modified_at(old),
+            dir(25, 23, "docs"),
+            file(26, 25, "GhidraAPI_javadoc.zip")
+                .sized(80 << 20)
+                .modified_at(old),
+            dir(27, 23, "lib"),
+            file(28, 27, "Base-src.zip")
+                .sized(600 << 20)
+                .modified_at(old),
+            file(29, 27, "Base.jar").sized(10 << 20).modified_at(old),
+            // A real installer, lying in Downloads itself.
+            file(30, 22, "setup.exe").sized(80 << 20).modified_at(old),
+            // An old film in a plain folder of the person's own.
+            dir(31, 21, "Films"),
+            file(32, 31, "holiday.mkv")
+                .sized(700 << 20)
+                .modified_at(old),
+        ]);
+        let tree = Tree::build(&index);
+        let s = suggest(&index, &tree, NOW, "pc");
+        assert_eq!(
+            names(&index, found(&s, "old_installers").unwrap()),
+            ["setup.exe"]
+        );
+        assert_eq!(
+            names(&index, found(&s, "old_big_files").unwrap()),
+            ["holiday.mkv"]
+        );
+    }
+
+    #[test]
     fn every_rule_id_is_unique() {
         let mut seen = HashSet::new();
         for rule in RULES {
             assert!(seen.insert(rule.id), "duplicate rule id {}", rule.id);
         }
     }
+}
+
+/// Extensions that make a folder a program's folder rather than a pile of
+/// files: what Windows, Java or a shell would run.
+const RUNNABLE: &[&str] = &[
+    "exe", "dll", "sys", "msi", "jar", "bat", "cmd", "ps1", "so", "node", "pyd",
+];
+
+/// Folders people drop installers into. Having an .exe in them does not
+/// make them a program's folder.
+const DROP_FOLDERS: &[&str] = &[
+    "downloads",
+    "desktop",
+    "documents",
+    "pictures",
+    "videos",
+    "music",
+];
+
+/// Whether a folder is a program's: something runnable lies directly in it
+/// (Ghidra's `ghidraRun.bat`, a game's `.exe`, a library folder's `.jar`).
+/// Nothing below such a folder is picked off for being old — it is a whole
+/// that works together. Folders people drop installers into do not count.
+fn is_program_folder(index: &Index, tree: &Tree, folder: NodeId) -> bool {
+    let name = index.name(folder as usize).to_lowercase();
+    if DROP_FOLDERS.contains(&name.as_str()) || name.starts_with("onedrive") {
+        return false;
+    }
+    tree.children(folder).iter().any(|c| {
+        !tree.is_dir(*c) && {
+            let ext = crate::kinds::extension(index.name(*c as usize));
+            RUNNABLE.iter().any(|r| ext.eq_ignore_ascii_case(r))
+        }
+    })
 }
