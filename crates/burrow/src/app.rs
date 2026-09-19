@@ -1593,12 +1593,11 @@ impl DiskApp {
                             let (folder, name) =
                                 file.path.rsplit_once('\\').unwrap_or(("", &file.path));
                             table_row.col(|ui| {
+                                // Protected places are no longer searched, but a
+                                // result can outlive a change on disk.
                                 if protected(file.node) {
-                                    ui.add_space(22.0);
-                                    ui.label(
-                                        egui::RichText::new("🔒").small().color(palette.muted),
-                                    )
-                                    .on_hover_text(lang.words().protected);
+                                    padlock(ui, palette.muted)
+                                        .on_hover_text(lang.words().protected);
                                 } else {
                                     let mut on = self.dupes.chosen.contains(&file.path);
                                     if ui.checkbox(&mut on, "").changed() {
@@ -2495,6 +2494,27 @@ fn share_bar(ui: &mut egui::Ui, lang: Lang, part: u64, whole: u64, palette: &the
         )
         .selectable(false),
     );
+}
+
+/// A small padlock, drawn: the emoji is not in every font Windows has, and
+/// a missing glyph looks like a stray character.
+fn padlock(ui: &mut egui::Ui, colour: egui::Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 14.0), egui::Sense::hover());
+    let painter = ui.painter();
+    let body =
+        egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, 2.5), egui::vec2(9.0, 7.0));
+    painter.rect_filled(body, 1.5, colour);
+    let shackle = egui::Rect::from_center_size(
+        body.center_top() + egui::vec2(0.0, -2.0),
+        egui::vec2(6.0, 7.0),
+    );
+    painter.rect_stroke(
+        shackle,
+        3.0,
+        egui::Stroke::new(1.5, colour),
+        egui::StrokeKind::Middle,
+    );
+    response
 }
 
 fn colour_chip(ui: &mut egui::Ui, colour: egui::Color32) {

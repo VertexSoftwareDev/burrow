@@ -20,6 +20,15 @@
 //! it), reparse points, NTFS's own metafiles. Hard links cannot show up as
 //! duplicates of each other — the index holds one entry per file, not per
 //! name.
+//!
+//! What is never *looked at*: every place [`crate::cleanup::is_protected`]
+//! guards — Windows, installed programs, the Recycle Bin, System Volume
+//! Information. Identical contents there are not waste. Windows keeps
+//! `Sessions.xml` beside `Sessions.back.xml` on purpose, to recover from an
+//! update that fails halfway; a game ships the same asset in two packages
+//! because it loads them separately; the Recycle Bin holds copies of what
+//! was just removed as duplicates. None of it can be removed from here, so
+//! none of it is counted as space that could be freed.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -89,7 +98,9 @@ pub fn candidates(index: &Index, tree: &Tree, min_size: u64) -> Vec<Candidate> {
                 || entry.allocated == 0
                 || entry.record < 16
                 || index.name_of(entry).starts_with('$') && entry.parent == ferret_core::ROOT_RECORD;
-            if skip {
+            // Checked last: it walks the parent chain, and the size test
+            // above has already ruled out almost every file.
+            if skip || crate::cleanup::is_protected(index, tree, node) {
                 return None;
             }
             Some(Candidate {
@@ -375,12 +386,14 @@ mod tests {
     #[test]
     fn candidates_skip_small_cloud_and_metafiles() {
         use ferret_core::mft::IS_CLOUD;
-        use ferret_core::testing::{file, index_from_specs};
+        use ferret_core::testing::{dir, file, index_from_specs};
         use ferret_core::ROOT_RECORD;
         let index = index_from_specs(vec![
-            file(20, ROOT_RECORD, "keep.bin").sized(2 << 20),
-            file(21, ROOT_RECORD, "tiny.txt").sized(10),
-            file(22, ROOT_RECORD, "online.mp4")
+            dir(30, ROOT_RECORD, "Users"),
+            dir(31, 30, "pc"),
+            file(20, 31, "keep.bin").sized(2 << 20),
+            file(21, 31, "tiny.txt").sized(10),
+            file(22, 31, "online.mp4")
                 .sized(5 << 20)
                 .with_flags(IS_CLOUD),
             file(3, ROOT_RECORD, "$Volume").sized(1 << 20),
@@ -389,5 +402,32 @@ mod tests {
         let found = candidates(&index, &tree, 1 << 20);
         let names: Vec<_> = found.iter().map(|c| index.name(c.node as usize)).collect();
         assert_eq!(names, ["keep.bin"]);
+    }
+
+    #[test]
+    fn protected_places_are_never_candidates() {
+        use ferret_core::testing::{dir, file, index_from_specs};
+        use ferret_core::ROOT_RECORD;
+        let index = index_from_specs(vec![
+            // Windows keeps this pair on purpose, to recover a failed update.
+            dir(30, ROOT_RECORD, "Windows"),
+            dir(31, 30, "servicing"),
+            dir(32, 31, "Sessions"),
+            file(33, 32, "Sessions.xml").sized(170 << 20),
+            file(34, 32, "Sessions.back.xml").sized(170 << 20),
+            // What was just recycled as a duplicate is not a duplicate again.
+            dir(40, ROOT_RECORD, "$Recycle.Bin"),
+            dir(41, 40, "S-1-5-21-1002"),
+            file(42, 41, "$RK7W92H.jar").sized(30 << 20),
+            dir(50, ROOT_RECORD, "Program Files"),
+            file(51, 50, "asset.pak").sized(30 << 20),
+            dir(60, ROOT_RECORD, "Users"),
+            dir(61, 60, "pc"),
+            file(62, 61, "client.jar").sized(30 << 20),
+        ]);
+        let tree = Tree::build(&index);
+        let found = candidates(&index, &tree, 1 << 20);
+        let names: Vec<_> = found.iter().map(|c| index.name(c.node as usize)).collect();
+        assert_eq!(names, ["client.jar"]);
     }
 }
