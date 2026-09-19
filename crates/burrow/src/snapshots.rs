@@ -1,4 +1,4 @@
-//! Where snapshots live: `%LOCALAPPDATA%\FerretDisk\snapshots`, one small
+//! Where snapshots live: `%LOCALAPPDATA%\Burrow\snapshots`, one small
 //! file per scan, named after the drive and the time.
 //!
 //! Twelve are kept per drive. Scanning again within an hour of the last
@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use ferret_tree::snapshot::{self, Snapshot};
+use burrow_tree::snapshot::{self, Snapshot};
 
 const KEEP: usize = 12;
 const SKIP_WITHIN: u64 = 3600;
@@ -23,7 +23,7 @@ pub struct Saved {
 
 fn folder() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(PathBuf::from(base).join("FerretDisk").join("snapshots"))
+    Some(PathBuf::from(base).join("Burrow").join("snapshots"))
 }
 
 /// Snapshots of a drive, newest first.

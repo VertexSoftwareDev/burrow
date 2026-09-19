@@ -1,17 +1,17 @@
 [package]
-name = "ferret-disk"
+name = "burrow"
 description = "Why is my disk full? A treemap of an NTFS volume, read in seconds."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "ferret-disk"
+name = "burrow"
 path = "src/main.rs"
 
 [dependencies]
 ferret-core = { path = "../ferret-core" }
-ferret-tree = { path = "../ferret-tree" }
+burrow-tree = { path = "../burrow-tree" }
 # `glow` rather than `wgpu`: flat rectangles and text, a fast start, and no
 # Direct3D stack. `persistence` remembers the drive, theme and language.
 eframe = { version = "0.36", default-features = false, features = [
@@ -29,6 +29,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
 ] }
+
+[build-dependencies]
+winresource = "0.1"
 
 [dev-dependencies]
 ferret-core = { path = "../ferret-core", features = ["testing"] }

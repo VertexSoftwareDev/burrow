@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use burrow_tree::{cleanup, dupes, snapshot, Kind, NodeId, Totals};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
-use ferret_tree::{cleanup, dupes, snapshot, Kind, NodeId, Totals};
 
 use crate::format;
 use crate::i18n::Lang;
@@ -220,6 +220,14 @@ pub struct DiskApp {
     shot: Option<Shot>,
 }
 
+/// What `--screenshot` asked for.
+pub struct Screenshot {
+    pub path: std::path::PathBuf,
+    pub tab: Option<String>,
+    /// `tr` or `en`, overriding the saved language for this run.
+    pub lang: Option<String>,
+}
+
 /// A pending `--screenshot`: wait for the scan and a few settled frames,
 /// ask for a capture, save it, close.
 struct Shot {
@@ -231,10 +239,7 @@ struct Shot {
 }
 
 impl DiskApp {
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        screenshot: Option<(std::path::PathBuf, Option<String>)>,
-    ) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<Screenshot>) -> Self {
         let prefs: Prefs = cc
             .storage
             .and_then(|s| eframe::get_value(s, prefs::KEY))
@@ -250,7 +255,11 @@ impl DiskApp {
 
         Self {
             worker,
-            lang: prefs.lang,
+            lang: match screenshot.as_ref().and_then(|s| s.lang.as_deref()) {
+                Some("en") => Lang::En,
+                Some("tr") => Lang::Tr,
+                _ => prefs.lang,
+            },
             theme: prefs.theme,
             metric: prefs.metric,
             phase: Phase::Starting,
@@ -279,9 +288,9 @@ impl DiskApp {
             recycling: false,
             toast: None,
             title: String::new(),
-            shot: screenshot.map(|(path, tab)| Shot {
-                path,
-                tab,
+            shot: screenshot.map(|s| Shot {
+                path: s.path,
+                tab: s.tab,
                 frames_ready: 0,
                 requested: false,
             }),
@@ -765,7 +774,7 @@ impl DiskApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("Ferret Disk")
+                        egui::RichText::new("Burrow")
                             .color(palette.accent)
                             .strong()
                             .size(15.0),
@@ -1006,7 +1015,7 @@ impl DiskApp {
             Some(scan) => self
                 .lang
                 .title(scan.letter, &format::size(self.lang, scan.drive.used())),
-            None => "Ferret Disk".to_string(),
+            None => "Burrow".to_string(),
         };
         if wanted != self.title {
             self.title = wanted.clone();
@@ -2405,7 +2414,7 @@ fn legend(ui: &mut egui::Ui, lang: Lang, theme_: Theme) {
  * Small shared pieces
  * -------------------------------------------------------------------- */
 
-fn value(tree: &ferret_tree::Tree, node: NodeId, metric: Metric) -> u64 {
+fn value(tree: &burrow_tree::Tree, node: NodeId, metric: Metric) -> u64 {
     let t = tree.totals(node);
     match metric {
         Metric::OnDisk => t.allocated,

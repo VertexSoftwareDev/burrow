@@ -436,6 +436,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "burrow"
+version = "0.1.0"
+dependencies = [
+ "burrow-tree",
+ "eframe",
+ "egui_extras",
+ "ferret-core",
+ "image",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
+ "winresource",
+]
+
+[[package]]
+name = "burrow-cli"
+version = "0.1.0"
+dependencies = [
+ "burrow-tree",
+ "ferret-core",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "burrow-tree"
+version = "0.1.0"
+dependencies = [
+ "ferret-core",
+ "rayon",
+ "sha2",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1054,38 +1087,6 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 [[package]]
 name = "ferret-core"
 version = "0.1.0"
-
-[[package]]
-name = "ferret-disk"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui_extras",
- "ferret-core",
- "ferret-tree",
- "image",
- "serde",
- "serde_json",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ferret-disk-cli"
-version = "0.1.0"
-dependencies = [
- "ferret-core",
- "ferret-tree",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ferret-tree"
-version = "0.1.0"
-dependencies = [
- "ferret-core",
- "rayon",
- "sha2",
-]
 
 [[package]]
 name = "find-msvc-tools"
@@ -2559,6 +2560,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2815,6 +2825,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.1.6+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2843,6 +2868,12 @@ checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tracing"
@@ -3544,6 +3575,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+dependencies = [
+ "toml",
+ "version_check",
 ]
 
 [[package]]

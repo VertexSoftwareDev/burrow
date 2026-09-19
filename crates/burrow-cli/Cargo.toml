@@ -1,5 +1,5 @@
 [package]
-name = "ferret-disk-cli"
+name = "burrow-cli"
 description = "Command-line disk usage report, and a check of the engine's sizes against Windows."
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 ferret-core = { path = "../ferret-core" }
-ferret-tree = { path = "../ferret-tree" }
+burrow-tree = { path = "../burrow-tree" }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",

@@ -1,4 +1,4 @@
-//! `ferret-disk --selftest-live report.txt`: prove, on the real disk, that
+//! `burrow --selftest-live report.txt`: prove, on the real disk, that
 //! the map follows the disk without a rescan.
 //!
 //! Scans the system drive, starts the watcher, writes a file of known size
@@ -11,9 +11,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use burrow_tree::Tree;
 use ferret_core::journal;
 use ferret_core::{ScanOptions, Volume};
-use ferret_tree::Tree;
 
 use crate::shell;
 use crate::watch::{self, WatchEvent};
@@ -78,7 +78,7 @@ fn live(out: &mut String) -> Result<bool, String> {
         let _ = tx.send(matches!(event, WatchEvent::Updated));
     });
 
-    let probe = temp.join(format!("ferret-disk-probe-{}.bin", std::process::id()));
+    let probe = temp.join(format!("burrow-probe-{}.bin", std::process::id()));
     let name = probe
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

@@ -1,4 +1,4 @@
-//! Ferret Disk — why is my disk full?
+//! Burrow — why is my disk full?
 //!
 //! Reads an NTFS volume's master file table in seconds, adds up every folder,
 //! and draws the result as a treemap next to a folder tree. The engine is
@@ -44,27 +44,32 @@ fn main() -> eframe::Result {
         .and_then(|i| args.get(i + 1))
         .map(std::path::PathBuf::from)
         .map(|path| {
-            let tab = args
-                .iter()
-                .position(|a| a == "--tab")
-                .and_then(|i| args.get(i + 1))
-                .cloned();
-            (path, tab)
+            let flag = |name: &str| {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            app::Screenshot {
+                path,
+                tab: flag("--tab"),
+                lang: flag("--lang"),
+            }
         });
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Ferret Disk")
+        .with_title("Burrow")
         .with_inner_size(INITIAL_SIZE)
         .with_min_inner_size(MINIMUM_SIZE)
         .with_clamp_size_to_monitor_size(true)
-        .with_app_id("dev.ferret.disk");
+        .with_app_id("dev.vertexsoftware.burrow");
 
     if let Some(icon) = icon() {
         viewport = viewport.with_icon(icon);
     }
 
     eframe::run_native(
-        "Ferret Disk",
+        "Burrow",
         eframe::NativeOptions {
             viewport,
             centered: true,

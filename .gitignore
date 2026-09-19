@@ -4,5 +4,3 @@
 **/*.rs.bk
 *.pdb
 
-# Copies of Ferret's front-end crates, kept only to borrow patterns from.
-/reference/

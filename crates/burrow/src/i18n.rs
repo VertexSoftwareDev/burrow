@@ -9,7 +9,7 @@
 //! methods — a missing `{}` in one language's format string is the kind of
 //! mistake that only shows when somebody switches to it.
 
-use ferret_tree::Kind;
+use burrow_tree::Kind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -152,12 +152,12 @@ const TR: Strings = Strings {
     retry: "Tekrar dene",
     elevation_title: "Yönetici izni gerekiyor",
     elevation_detail: concat!(
-        "Ferret Disk, diski doğrudan okuyarak saniyeler içinde tarıyor; Windows bunun için ",
+        "Burrow, diski doğrudan okuyarak saniyeler içinde tarıyor; Windows bunun için ",
         "yönetici izni istiyor. Diske yalnızca okuma yapılır, hiçbir şey yazılmaz."
     ),
     elevation_action: "Yönetici olarak yeniden başlat",
     no_volume_title: "NTFS sürücüsü bulunamadı",
-    no_volume_detail: "Ferret Disk şimdilik yalnızca NTFS birimlerini okuyabiliyor.",
+    no_volume_detail: "Burrow şimdilik yalnızca NTFS birimlerini okuyabiliyor.",
     not_ntfs: "NTFS değil",
     copied: "Yol kopyalandı.",
     live_tooltip: "Disk izleniyor: dosyalar eklendikçe, silindikçe ve büyüdükçe harita kendini günceller. Yeniden taramaya gerek yok.",
@@ -226,12 +226,12 @@ const EN: Strings = Strings {
     retry: "Try again",
     elevation_title: "Administrator rights needed",
     elevation_detail: concat!(
-        "Ferret Disk reads the disk directly, which is what makes a scan take seconds; ",
+        "Burrow reads the disk directly, which is what makes a scan take seconds; ",
         "Windows requires administrator rights for that. The disk is only read, never written."
     ),
     elevation_action: "Restart as administrator",
     no_volume_title: "No NTFS drive found",
-    no_volume_detail: "Ferret Disk can only read NTFS volumes for now.",
+    no_volume_detail: "Burrow can only read NTFS volumes for now.",
     not_ntfs: "not NTFS",
     copied: "Path copied.",
     live_tooltip: "Watching the disk: the map updates itself as files are added, deleted and grow. No rescan needed.",
@@ -383,8 +383,8 @@ impl Lang {
 
     pub fn title(self, letter: char, used: &str) -> String {
         match self {
-            Lang::Tr => format!("Ferret Disk — {letter}: {used} dolu"),
-            Lang::En => format!("Ferret Disk — {letter}: {used} used"),
+            Lang::Tr => format!("Burrow — {letter}: {used} dolu"),
+            Lang::En => format!("Burrow — {letter}: {used} used"),
         }
     }
 

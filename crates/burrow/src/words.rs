@@ -2,7 +2,7 @@
 //! and what removing it will do. Kept apart from the rest of the interface
 //! text because it is most of it.
 
-use ferret_tree::cleanup::Safety;
+use burrow_tree::cleanup::Safety;
 
 use crate::i18n::Lang;
 
@@ -252,7 +252,7 @@ impl Lang {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferret_tree::cleanup::RULES;
+    use burrow_tree::cleanup::RULES;
 
     #[test]
     fn every_rule_has_words_in_both_languages() {

@@ -10,8 +10,8 @@
 //! neutral grey, and the name of every coloured tile is also in its label,
 //! its tooltip and the legend: colour is never the only way to tell.
 
+use burrow_tree::Kind;
 use eframe::egui;
-use ferret_tree::Kind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]

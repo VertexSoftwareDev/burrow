@@ -31,9 +31,9 @@ use std::collections::HashMap;
 use std::sync::{RwLock, Weak};
 use std::time::{Duration, Instant};
 
+use burrow_tree::Tree;
 use ferret_core::journal::{self, Change, Cursor};
 use ferret_core::Volume;
-use ferret_tree::Tree;
 
 use crate::shell;
 use crate::worker::Scan;
@@ -61,7 +61,7 @@ pub fn spawn(
     sink: impl Fn(WatchEvent) + Send + 'static,
 ) {
     let _ = std::thread::Builder::new()
-        .name(format!("ferret-disk-watch-{letter}"))
+        .name(format!("burrow-watch-{letter}"))
         .spawn(move || run(scan, letter, cursor, &sink));
 }
 

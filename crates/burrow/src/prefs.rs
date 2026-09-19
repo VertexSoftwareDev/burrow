@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::i18n::Lang;
 use crate::theme::Theme;
 
-pub const KEY: &str = "ferret-disk-prefs";
+pub const KEY: &str = "burrow-prefs";
 
 /// Which size the map and the lists rank by.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]

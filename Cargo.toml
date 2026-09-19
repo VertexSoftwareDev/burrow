@@ -1,16 +1,17 @@
-﻿[workspace]
+[workspace]
 resolver = "2"
 members = [
     "crates/ferret-core",
-    "crates/ferret-tree",
-    "crates/ferret-disk-cli",
-    "crates/ferret-disk",
+    "crates/burrow-tree",
+    "crates/burrow-cli",
+    "crates/burrow",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+rust-version = "1.87"
 
 [profile.release]
 opt-level = 3

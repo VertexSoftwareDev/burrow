@@ -1,5 +1,5 @@
 [package]
-name = "ferret-tree"
+name = "burrow-tree"
 description = "Folder totals, largest-item lists and type breakdowns over a Ferret index."
 version.workspace = true
 edition.workspace = true

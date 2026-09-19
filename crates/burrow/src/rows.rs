@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use ferret_tree::{NodeId, Tree};
+use burrow_tree::{NodeId, Tree};
 
 use crate::prefs::Metric;
 

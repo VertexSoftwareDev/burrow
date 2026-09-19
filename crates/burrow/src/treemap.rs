@@ -24,9 +24,9 @@
 
 use std::sync::Arc;
 
+use burrow_tree::{Kind, NodeId, Tree};
 use eframe::egui::{self, pos2, vec2, Color32, Mesh, Pos2, Rect};
 use ferret_core::Index;
-use ferret_tree::{Kind, NodeId, Tree};
 
 use crate::prefs::Metric;
 use crate::theme::{self, Theme};

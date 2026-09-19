@@ -9,9 +9,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use burrow_tree::{cleanup, dupes, snapshot, Tree};
 use eframe::egui;
 use ferret_core::{Index, ScanOptions};
-use ferret_tree::{cleanup, dupes, snapshot, Tree};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::shell::{self, Drive};
@@ -126,7 +126,7 @@ impl Worker {
         let (request_tx, request_rx) = mpsc::channel::<Request>();
         let (event_tx, event_rx) = mpsc::channel::<Event>();
         std::thread::Builder::new()
-            .name("ferret-disk-worker".into())
+            .name("burrow-worker".into())
             .spawn(move || {
                 run(
                     request_rx,
@@ -182,7 +182,7 @@ fn run(requests: Receiver<Request>, sink: Sink) {
                     let shared = shared.clone();
                     let sink = sink.clone();
                     let _ = std::thread::Builder::new()
-                        .name("ferret-disk-snapshot".into())
+                        .name("burrow-snapshot".into())
                         .spawn(move || {
                             let snap = shared.read().ok().map(|s| {
                                 snapshot::capture(&s.index, &s.tree, s.drive.used(), unix_now())
@@ -221,7 +221,7 @@ fn run(requests: Receiver<Request>, sink: Sink) {
             } => {
                 let sink = sink.clone();
                 let _ = std::thread::Builder::new()
-                    .name("ferret-disk-dupes".into())
+                    .name("burrow-dupes".into())
                     .spawn(move || find_duplicates(&scan, min_size, &cancel, &sink));
             }
             Request::Suggest(scan) => {

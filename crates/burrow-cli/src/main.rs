@@ -1,5 +1,5 @@
-//! `ferret-disk-cli report C` - where the space on a drive went.
-//! `ferret-disk-cli verify C` - check the engine's sizes against Windows.
+//! `burrow-cli report C` - where the space on a drive went.
+//! `burrow-cli verify C` - check the engine's sizes against Windows.
 //!
 //! Both need administrator rights, because both read the raw volume.
 
@@ -11,9 +11,9 @@ use std::os::windows::io::AsRawHandle;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use burrow_tree::{NodeId, Tree};
 use ferret_core::mft::{IS_COMPRESSED, IS_SPARSE};
 use ferret_core::{human_size, Index, ScanOptions};
-use ferret_tree::{NodeId, Tree};
 use windows_sys::Win32::Storage::FileSystem::{
     FileStandardInfo, GetDiskFreeSpaceExW, GetFileInformationByHandleEx,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
@@ -41,9 +41,9 @@ fn main() -> ExitCode {
         "verify" => verify(letter, number("--sample", 3000)),
         "dupes" => dupes(letter, number("--min", 1 << 20) as u64, number("--top", 20)),
         _ => {
-            eprintln!("usage: ferret-disk-cli report <drive> [--top N]");
-            eprintln!("       ferret-disk-cli verify <drive> [--sample N]");
-            eprintln!("       ferret-disk-cli dupes <drive> [--min BYTES] [--top N]");
+            eprintln!("usage: burrow-cli report <drive> [--top N]");
+            eprintln!("       burrow-cli verify <drive> [--sample N]");
+            eprintln!("       burrow-cli dupes <drive> [--min BYTES] [--top N]");
             return ExitCode::from(2);
         }
     };
@@ -350,7 +350,7 @@ fn verify(letter: char, sample: usize) -> Result<ExitCode, String> {
 }
 
 fn dupes(letter: char, min_size: u64, top: usize) -> Result<ExitCode, String> {
-    use ferret_tree::dupes;
+    use burrow_tree::dupes;
     use std::sync::atomic::AtomicBool;
 
     let Scanned { index, tree } = scan(letter)?;
