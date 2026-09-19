@@ -6,11 +6,13 @@
 //! focused on any folder, and the tree keeps showing the whole disk.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
-use ferret_tree::{Kind, NodeId, Totals};
+use ferret_tree::{dupes, Kind, NodeId, Totals};
 
 use crate::format;
 use crate::i18n::Lang;
@@ -35,6 +37,57 @@ enum Tab {
     Folders,
     Largest,
     Kinds,
+    Duplicates,
+}
+
+/// The duplicates tab: a search that can be running, and what it found.
+struct DupesView {
+    min_size: u64,
+    /// Set while a search runs; setting the flag stops it.
+    cancel: Option<Arc<AtomicBool>>,
+    progress: Option<dupes::Progress>,
+    groups: Vec<dupes::Group>,
+    /// (seconds, cancelled) of the last finished search.
+    finished: Option<(f64, bool)>,
+    collapsed: HashSet<usize>,
+    rows: Vec<DupRow>,
+}
+
+#[derive(Clone, Copy)]
+enum DupRow {
+    Group(usize),
+    File(usize, usize),
+}
+
+impl DupesView {
+    fn new() -> Self {
+        Self {
+            min_size: 1 << 20,
+            cancel: None,
+            progress: None,
+            groups: Vec::new(),
+            finished: None,
+            collapsed: HashSet::new(),
+            rows: Vec::new(),
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn relayout(&mut self) {
+        self.rows.clear();
+        for (g, group) in self.groups.iter().enumerate() {
+            self.rows.push(DupRow::Group(g));
+            if !self.collapsed.contains(&g) {
+                self.rows
+                    .extend((0..group.files.len()).map(|f| DupRow::File(g, f)));
+            }
+        }
+    }
 }
 
 /// Something a view wants done. Collected while drawing — the views borrow
@@ -84,6 +137,8 @@ pub struct DiskApp {
     largest: Option<(u64, Metric, Vec<NodeId>)>,
     kinds: Option<(u64, NodeId, Vec<(Kind, Totals)>, Vec<(String, Totals)>)>,
 
+    dupes: DupesView,
+
     toast: Option<(String, Instant)>,
     title: String,
     shot: Option<Shot>,
@@ -93,12 +148,17 @@ pub struct DiskApp {
 /// ask for a capture, save it, close.
 struct Shot {
     path: std::path::PathBuf,
+    /// Which tab to show; the duplicates tab also runs its search first.
+    tab: Option<String>,
     frames_ready: u32,
     requested: bool,
 }
 
 impl DiskApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<std::path::PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        screenshot: Option<(std::path::PathBuf, Option<String>)>,
+    ) -> Self {
         let prefs: Prefs = cc
             .storage
             .and_then(|s| eframe::get_value(s, prefs::KEY))
@@ -135,10 +195,12 @@ impl DiskApp {
             menu_node: None,
             largest: None,
             kinds: None,
+            dupes: DupesView::new(),
             toast: None,
             title: String::new(),
-            shot: screenshot.map(|path| Shot {
+            shot: screenshot.map(|(path, tab)| Shot {
                 path,
+                tab,
                 frames_ready: 0,
                 requested: false,
             }),
@@ -167,10 +229,33 @@ impl DiskApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        let settled = matches!(
+        let mut settled = matches!(
             self.phase,
             Phase::Ready | Phase::NeedsElevation | Phase::Failed { .. } | Phase::NoVolume
         );
+        if settled && matches!(self.phase, Phase::Ready) {
+            match shot.tab.as_deref() {
+                Some("largest") => self.tab = Tab::Largest,
+                Some("kinds") => self.tab = Tab::Kinds,
+                Some("duplicates") => {
+                    self.tab = Tab::Duplicates;
+                    if self.dupes.cancel.is_none() && self.dupes.finished.is_none() {
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        self.dupes.cancel = Some(cancel.clone());
+                        self.dupes.min_size = 10 << 20;
+                        if let Some(scan) = self.scan.clone() {
+                            self.worker.send(Request::FindDuplicates {
+                                scan,
+                                min_size: 10 << 20,
+                                cancel,
+                            });
+                        }
+                    }
+                    settled = self.dupes.finished.is_some();
+                }
+                _ => {}
+            }
+        }
         if settled && !shot.requested {
             shot.frames_ready += 1;
             if shot.frames_ready >= 5 {
@@ -281,6 +366,11 @@ impl DiskApp {
                     self.layout = None;
                     self.largest = None;
                     self.kinds = None;
+                    // Found in the old index; its node ids mean nothing now.
+                    self.dupes.stop();
+                    let min_size = self.dupes.min_size;
+                    self.dupes = DupesView::new();
+                    self.dupes.min_size = min_size;
                     self.worker.send(Request::Drives);
                 }
                 Event::Scanned(letter, Err(message)) => {
@@ -291,6 +381,24 @@ impl DiskApp {
                     };
                 }
                 Event::Changed => self.after_change(),
+                Event::DupesProgress(progress) => {
+                    if self.dupes.cancel.is_some() {
+                        self.dupes.progress = Some(progress);
+                    }
+                }
+                Event::DupesFound {
+                    groups,
+                    seconds,
+                    cancelled,
+                } => {
+                    self.dupes.cancel = None;
+                    self.dupes.progress = None;
+                    self.dupes.groups = groups;
+                    self.dupes.finished = Some((seconds, cancelled));
+                    // Open the first few; a thousand open groups is a wall.
+                    self.dupes.collapsed = (10..self.dupes.groups.len()).collect();
+                    self.dupes.relayout();
+                }
                 Event::Stale => {
                     let text = self.lang.strings().stale.to_string();
                     self.inform(text);
@@ -783,12 +891,14 @@ impl DiskApp {
                     ui.selectable_value(&mut self.tab, Tab::Folders, strings.tab_folders);
                     ui.selectable_value(&mut self.tab, Tab::Largest, strings.tab_largest);
                     ui.selectable_value(&mut self.tab, Tab::Kinds, strings.tab_kinds);
+                    ui.selectable_value(&mut self.tab, Tab::Duplicates, strings.tab_duplicates);
                 });
                 ui.add_space(4.0);
                 match self.tab {
                     Tab::Folders => self.folders(ui, scan, actions),
                     Tab::Largest => self.largest(ui, scan, actions),
                     Tab::Kinds => self.kinds(ui, scan),
+                    Tab::Duplicates => self.duplicates(ui, scan, actions),
                 }
             });
     }
@@ -1111,6 +1221,190 @@ impl DiskApp {
                     row.col(|ui| right_label(ui, &lang.number(totals.files as u64), palette.muted));
                 });
             });
+    }
+}
+
+impl DiskApp {
+    fn duplicates(&mut self, ui: &mut egui::Ui, scan: &Scan, actions: &mut Vec<Action>) {
+        let palette = theme::palette(self.theme);
+        let strings = self.lang.strings();
+        let lang = self.lang;
+        let running = self.dupes.cancel.is_some();
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(strings.dupes_min).color(palette.muted));
+            for size in [1u64 << 20, 10 << 20, 100 << 20] {
+                ui.add_enabled_ui(!running, |ui| {
+                    ui.selectable_value(&mut self.dupes.min_size, size, format::size(lang, size));
+                });
+            }
+            ui.add_space(8.0);
+            if running {
+                if ui.button(strings.dupes_stop).clicked() {
+                    self.dupes.stop();
+                }
+            } else if ui.button(strings.dupes_start).clicked() {
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.dupes.cancel = Some(cancel.clone());
+                self.dupes.progress = None;
+                if let Some(shared) = self.scan.clone() {
+                    self.worker.send(Request::FindDuplicates {
+                        scan: shared,
+                        min_size: self.dupes.min_size,
+                        cancel,
+                    });
+                }
+            }
+        });
+        ui.add_space(4.0);
+
+        if running {
+            let p = self.dupes.progress.unwrap_or_default();
+            let fraction = p.bytes_done as f32 / p.bytes_total.max(1) as f32;
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .corner_radius(4)
+                    .desired_height(8.0),
+            );
+            ui.label(
+                egui::RichText::new(lang.dupes_progress(
+                    &format::size(lang, p.bytes_done),
+                    &format::size(lang, p.bytes_total),
+                    p.groups,
+                ))
+                .small()
+                .color(palette.muted),
+            );
+            ui.add_space(4.0);
+        } else {
+            match self.dupes.finished {
+                None => {
+                    ui.label(egui::RichText::new(strings.dupes_intro).color(palette.muted));
+                    return;
+                }
+                Some((seconds, cancelled)) => {
+                    let wasted: u64 = self.dupes.groups.iter().map(|g| g.wasted()).sum();
+                    let text = if self.dupes.groups.is_empty() {
+                        strings.dupes_none.to_string()
+                    } else {
+                        lang.dupes_summary(
+                            self.dupes.groups.len(),
+                            &format::size(lang, wasted),
+                            seconds,
+                        )
+                    };
+                    ui.label(egui::RichText::new(text).strong());
+                    if cancelled {
+                        ui.label(
+                            egui::RichText::new(strings.dupes_cancelled)
+                                .small()
+                                .color(palette.muted),
+                        );
+                    }
+                    ui.add_space(4.0);
+                }
+            }
+        }
+
+        let groups = &self.dupes.groups;
+        let rows = &self.dupes.rows;
+        let selected = self.selected;
+        let mut toggled = None;
+        TableBuilder::new(ui)
+            .id_salt("duplicates")
+            .striped(false)
+            .sense(egui::Sense::click())
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::remainder().at_least(200.0).clip(true))
+            .column(Column::initial(96.0).at_least(64.0))
+            .min_scrolled_height(0.0)
+            .body(|body| {
+                body.rows(ROW_HEIGHT, rows.len(), |mut table_row| {
+                    match rows[table_row.index()] {
+                        DupRow::Group(g) => {
+                            let group = &groups[g];
+                            let open = !self.dupes.collapsed.contains(&g);
+                            table_row.col(|ui| {
+                                ui.label(
+                                    egui::RichText::new(if open { "⏷" } else { "⏵" })
+                                        .color(palette.muted),
+                                );
+                                ui.label(
+                                    egui::RichText::new(lang.dupes_group(
+                                        group.files.len(),
+                                        &format::size(lang, group.size),
+                                    ))
+                                    .strong(),
+                                );
+                            });
+                            table_row.col(|ui| {
+                                right_label(
+                                    ui,
+                                    &format::size(lang, group.wasted()),
+                                    palette.danger,
+                                );
+                            });
+                            if table_row.response().clicked() {
+                                toggled = Some(g);
+                            }
+                        }
+                        DupRow::File(g, f) => {
+                            let file = &groups[g].files[f];
+                            table_row.set_selected(selected == Some(file.node));
+                            let (folder, name) =
+                                file.path.rsplit_once('\\').unwrap_or(("", &file.path));
+                            table_row.col(|ui| {
+                                ui.add_space(22.0);
+                                swatch(
+                                    ui,
+                                    self.theme,
+                                    false,
+                                    &scan.index,
+                                    file.node,
+                                    scan.tree.root(),
+                                );
+                                ui.add(egui::Label::new(name).selectable(false));
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(folder).small().color(palette.muted),
+                                    )
+                                    .selectable(false)
+                                    .truncate(),
+                                );
+                            });
+                            table_row.col(|_| {});
+                            let response = table_row.response();
+                            if response.clicked() && scan.tree.contains(file.node) {
+                                actions.push(Action::Select {
+                                    node: file.node,
+                                    from_map: false,
+                                });
+                            }
+                            response.context_menu(|ui| {
+                                ui.set_min_width(200.0);
+                                if ui.button(strings.menu_open).clicked() {
+                                    actions.push(Action::Open(file.path.clone()));
+                                    ui.close();
+                                }
+                                if ui.button(strings.menu_reveal).clicked() {
+                                    actions.push(Action::Reveal(file.path.clone()));
+                                    ui.close();
+                                }
+                                if ui.button(strings.menu_copy).clicked() {
+                                    actions.push(Action::Copy(file.path.clone()));
+                                    ui.close();
+                                }
+                            });
+                        }
+                    }
+                });
+            });
+        if let Some(g) = toggled {
+            if !self.dupes.collapsed.remove(&g) {
+                self.dupes.collapsed.insert(g);
+            }
+            self.dupes.relayout();
+        }
     }
 }
 

@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ferret_core::{Index, ScanOptions};
-use ferret_tree::Tree;
+use ferret_tree::{dupes, Tree};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::shell::{self, Drive};
 use crate::watch::{self, WatchEvent};
@@ -49,6 +50,13 @@ pub enum Request {
     Reveal(String),
     CheckElevation,
     RestartElevated,
+    /// Look for duplicate files in a scan, on a thread of its own so the
+    /// worker stays free. Stops early when cancel is set.
+    FindDuplicates {
+        scan: SharedScan,
+        min_size: u64,
+        cancel: Arc<AtomicBool>,
+    },
 }
 
 pub enum Event {
@@ -63,6 +71,12 @@ pub enum Event {
     Changed,
     /// The change journal can no longer be followed; a rescan is needed.
     Stale,
+    DupesProgress(dupes::Progress),
+    DupesFound {
+        groups: Vec<dupes::Group>,
+        seconds: f64,
+        cancelled: bool,
+    },
     Failed(String),
     /// An elevated copy is starting; this one should close.
     Restarting,
@@ -149,6 +163,16 @@ fn run(requests: Receiver<Request>, sink: Sink) {
                     sink.send(Event::Failed(err));
                 }
             }
+            Request::FindDuplicates {
+                scan,
+                min_size,
+                cancel,
+            } => {
+                let sink = sink.clone();
+                let _ = std::thread::Builder::new()
+                    .name("ferret-disk-dupes".into())
+                    .spawn(move || find_duplicates(&scan, min_size, &cancel, &sink));
+            }
             Request::CheckElevation => sink.send(Event::Elevation(shell::is_elevated())),
             Request::RestartElevated => match shell::restart_elevated() {
                 Ok(()) => {
@@ -216,4 +240,28 @@ fn scan(letter: char, sink: &Sink) -> Result<(SharedScan, Option<Cursor>), Strin
         changes: 0,
     }));
     Ok((shared, cursor))
+}
+
+fn find_duplicates(scan: &SharedScan, min_size: u64, cancel: &AtomicBool, sink: &Sink) {
+    let started = Instant::now();
+    // The list of candidates needs the index; the reading does not, so the
+    // lock is held only for the first.
+    let candidates = match scan.read() {
+        Ok(scan) => dupes::candidates(&scan.index, &scan.tree, min_size),
+        Err(_) => return,
+    };
+    let last = std::sync::Mutex::new(Instant::now() - PROGRESS_EVERY);
+    let groups = dupes::find(candidates, &dupes::Disk, cancel, &|progress| {
+        if let Ok(mut last) = last.lock() {
+            if last.elapsed() >= PROGRESS_EVERY {
+                *last = Instant::now();
+                sink.send(Event::DupesProgress(progress));
+            }
+        }
+    });
+    sink.send(Event::DupesFound {
+        groups,
+        seconds: started.elapsed().as_secs_f64(),
+        cancelled: cancel.load(Ordering::Relaxed),
+    });
 }

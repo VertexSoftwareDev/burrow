@@ -39,9 +39,11 @@ fn main() -> ExitCode {
     let result = match command {
         "report" => report(letter, number("--top", 20)),
         "verify" => verify(letter, number("--sample", 3000)),
+        "dupes" => dupes(letter, number("--min", 1 << 20) as u64, number("--top", 20)),
         _ => {
             eprintln!("usage: ferret-disk-cli report <drive> [--top N]");
             eprintln!("       ferret-disk-cli verify <drive> [--sample N]");
+            eprintln!("       ferret-disk-cli dupes <drive> [--min BYTES] [--top N]");
             return ExitCode::from(2);
         }
     };
@@ -345,6 +347,49 @@ fn verify(letter: char, sample: usize) -> Result<ExitCode, String> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+fn dupes(letter: char, min_size: u64, top: usize) -> Result<ExitCode, String> {
+    use ferret_tree::dupes;
+    use std::sync::atomic::AtomicBool;
+
+    let Scanned { index, tree } = scan(letter)?;
+    let started = Instant::now();
+    let candidates = dupes::candidates(&index, &tree, min_size);
+    let count = candidates.len();
+    let last = std::sync::Mutex::new(Instant::now());
+    let groups = dupes::find(candidates, &dupes::Disk, &AtomicBool::new(false), &|p| {
+        let mut last = last.lock().unwrap();
+        if last.elapsed().as_secs() >= 2 {
+            *last = Instant::now();
+            eprintln!(
+                "   {} / {} read, {} groups so far",
+                human_size(p.bytes_done),
+                human_size(p.bytes_total),
+                p.groups
+            );
+        }
+    });
+    let wasted: u64 = groups.iter().map(|g| g.wasted()).sum();
+    println!(
+        "\n{count} files of at least {} compared in {:.1}s: {} groups of duplicates, {} reclaimable",
+        human_size(min_size),
+        started.elapsed().as_secs_f64(),
+        groups.len(),
+        human_size(wasted)
+    );
+    for group in groups.iter().take(top) {
+        println!(
+            "\n  {} x {} = {} wasted",
+            group.files.len(),
+            human_size(group.size),
+            human_size(group.wasted())
+        );
+        for file in &group.files {
+            println!("     {}", file.path);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// What Windows says about a file's sizes and links.

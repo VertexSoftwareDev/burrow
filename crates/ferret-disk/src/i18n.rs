@@ -42,6 +42,13 @@ pub struct Strings {
     pub tab_folders: &'static str,
     pub tab_largest: &'static str,
     pub tab_kinds: &'static str,
+    pub tab_duplicates: &'static str,
+    pub dupes_intro: &'static str,
+    pub dupes_min: &'static str,
+    pub dupes_start: &'static str,
+    pub dupes_stop: &'static str,
+    pub dupes_none: &'static str,
+    pub dupes_cancelled: &'static str,
 
     pub col_name: &'static str,
     pub col_share: &'static str,
@@ -99,6 +106,17 @@ const TR: Strings = Strings {
     tab_folders: "Klasörler",
     tab_largest: "En büyük dosyalar",
     tab_kinds: "Türler",
+    tab_duplicates: "Kopyalar",
+    dupes_intro: concat!(
+        "İçeriği birebir aynı dosyaları bulur. Önce boyutlar karşılaştırılır (diski okumadan), ",
+        "sonra yalnızca eşleşenlerin başı ve sonu, en son da hâlâ eşleşenlerin tamamı okunur. ",
+        "Yalnızca bulutta duran dosyalar okunmaz, yani indirilmez."
+    ),
+    dupes_min: "En az",
+    dupes_start: "Kopyaları bul",
+    dupes_stop: "Durdur",
+    dupes_none: "Kopya dosya bulunamadı.",
+    dupes_cancelled: "Arama durduruldu; liste eksik olabilir.",
 
     col_name: "Ad",
     col_share: "Pay",
@@ -162,6 +180,17 @@ const EN: Strings = Strings {
     tab_folders: "Folders",
     tab_largest: "Largest files",
     tab_kinds: "Kinds",
+    tab_duplicates: "Duplicates",
+    dupes_intro: concat!(
+        "Finds files with byte-for-byte identical contents. Sizes are compared first (without reading the disk), ",
+        "then only the matches have their first and last bytes read, and only files that still match are read in full. ",
+        "Cloud-only files are never read, so never downloaded."
+    ),
+    dupes_min: "At least",
+    dupes_start: "Find duplicates",
+    dupes_stop: "Stop",
+    dupes_none: "No duplicate files found.",
+    dupes_cancelled: "Search stopped; the list may be incomplete.",
 
     col_name: "Name",
     col_share: "Share",
@@ -279,6 +308,33 @@ impl Lang {
             (Lang::En, 0) => "live".into(),
             (Lang::Tr, _) => format!("canlı · {count} değişiklik"),
             (Lang::En, _) => format!("live · {count} changes"),
+        }
+    }
+
+    pub fn dupes_progress(self, done: &str, total: &str, groups: usize) -> String {
+        let groups = self.number(groups as u64);
+        match self {
+            Lang::Tr => format!("{done} / {total} okundu · {groups} grup"),
+            Lang::En => format!("{done} of {total} read · {groups} groups"),
+        }
+    }
+
+    pub fn dupes_summary(self, groups: usize, wasted: &str, seconds: f64) -> String {
+        let groups = self.number(groups as u64);
+        match self {
+            Lang::Tr => format!(
+                "{groups} kopya grubu · {wasted} boşa · {} sn",
+                format!("{seconds:.0}")
+            ),
+            Lang::En => format!("{groups} groups of duplicates · {wasted} wasted · {seconds:.0} s"),
+        }
+    }
+
+    /// 3 × 146 MB.
+    pub fn dupes_group(self, count: usize, size: &str) -> String {
+        match self {
+            Lang::Tr => format!("{count} kopya × {size}"),
+            Lang::En => format!("{count} copies × {size}"),
         }
     }
 

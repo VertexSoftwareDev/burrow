@@ -19,6 +19,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use ferret_core::{Entry, Index, ROOT_RECORD};
 
+pub mod dupes;
 pub mod kinds;
 
 pub use kinds::Kind;

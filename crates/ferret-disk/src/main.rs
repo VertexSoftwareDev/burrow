@@ -40,7 +40,15 @@ fn main() -> eframe::Result {
         .iter()
         .position(|a| a == "--screenshot")
         .and_then(|i| args.get(i + 1))
-        .map(std::path::PathBuf::from);
+        .map(std::path::PathBuf::from)
+        .map(|path| {
+            let tab = args
+                .iter()
+                .position(|a| a == "--tab")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
+            (path, tab)
+        });
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Ferret Disk")
