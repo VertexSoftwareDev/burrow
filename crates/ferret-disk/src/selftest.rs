@@ -3,7 +3,7 @@
 //!
 //! Scans the system drive, starts the watcher, writes a file of known size
 //! into the temp folder, and waits for the tree to account for it; then
-//! deletes it and waits for it to leave. Every step, and PASS or FAIL, goes
+//! moves it to the recycle bin and waits for it to leave. Every step, and PASS or FAIL, goes
 //! to the report — the release build has no console to print to.
 
 use std::io::Write;
@@ -19,7 +19,7 @@ use crate::shell;
 use crate::watch::{self, WatchEvent};
 use crate::worker::Scan;
 
-const PROBE_BYTES: usize = 64 << 20;
+const PROBE_BYTES: usize = 8 << 20;
 const WAIT: Duration = Duration::from_secs(12);
 
 pub fn run(report: &std::path::Path) -> i32 {
@@ -110,7 +110,12 @@ fn live(out: &mut String) -> Result<bool, String> {
         }
     };
 
-    std::fs::remove_file(&probe).map_err(|e| e.to_string())?;
+    // Removed the way the window removes things: into the recycle bin.
+    let recycled = shell::recycle(&[probe.to_string_lossy().into_owned()]);
+    out.push_str(&format!(
+        "recycled: {} of {} gone, aborted {}\n",
+        recycled.gone, recycled.requested, recycled.aborted
+    ));
     let gone = wait_for(&rx, &shared, |scan| Some(find(scan, &name).is_none()));
     let disappeared = match gone {
         Some(elapsed) => {

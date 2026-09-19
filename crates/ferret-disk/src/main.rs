@@ -17,6 +17,7 @@ mod shell;
 mod theme;
 mod treemap;
 mod watch;
+mod words;
 mod worker;
 
 use eframe::egui;

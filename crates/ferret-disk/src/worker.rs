@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ferret_core::{Index, ScanOptions};
-use ferret_tree::{dupes, Tree};
+use ferret_tree::{cleanup, dupes, Tree};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::shell::{self, Drive};
@@ -57,6 +57,15 @@ pub enum Request {
         min_size: u64,
         cancel: Arc<AtomicBool>,
     },
+    /// Run the cleanup rules over a scan.
+    Suggest(SharedScan),
+    /// Move paths to the recycle bin; ytes is what they hold.
+    Recycle {
+        paths: Vec<String>,
+        bytes: u64,
+    },
+    OpenRecycleBin,
+    OpenDiskCleanup,
 }
 
 pub enum Event {
@@ -72,6 +81,16 @@ pub enum Event {
     /// The change journal can no longer be followed; a rescan is needed.
     Stale,
     DupesProgress(dupes::Progress),
+    Suggestions {
+        generation: u64,
+        list: Vec<cleanup::Suggestion>,
+    },
+    /// What a recycle achieved. ytes is what was asked to go: the space
+    /// only comes back when the recycle bin is emptied.
+    Recycled {
+        result: shell::Recycled,
+        bytes: u64,
+    },
     DupesFound {
         groups: Vec<dupes::Group>,
         seconds: f64,
@@ -173,6 +192,29 @@ fn run(requests: Receiver<Request>, sink: Sink) {
                     .name("ferret-disk-dupes".into())
                     .spawn(move || find_duplicates(&scan, min_size, &cancel, &sink));
             }
+            Request::Suggest(scan) => {
+                let found = scan.read().ok().map(|s| {
+                    let now = now_filetime();
+                    (s.generation, cleanup::suggest(&s.index, &s.tree, now))
+                });
+                if let Some((generation, list)) = found {
+                    sink.send(Event::Suggestions { generation, list });
+                }
+            }
+            Request::Recycle { paths, bytes } => {
+                let result = shell::recycle(&paths);
+                sink.send(Event::Recycled { result, bytes });
+            }
+            Request::OpenRecycleBin => {
+                if let Err(err) = shell::open_recycle_bin() {
+                    sink.send(Event::Failed(err));
+                }
+            }
+            Request::OpenDiskCleanup => {
+                if let Err(err) = shell::open_disk_cleanup() {
+                    sink.send(Event::Failed(err));
+                }
+            }
             Request::CheckElevation => sink.send(Event::Elevation(shell::is_elevated())),
             Request::RestartElevated => match shell::restart_elevated() {
                 Ok(()) => {
@@ -264,4 +306,12 @@ fn find_duplicates(scan: &SharedScan, min_size: u64, cancel: &AtomicBool, sink: 
         seconds: started.elapsed().as_secs_f64(),
         cancelled: cancel.load(Ordering::Relaxed),
     });
+}
+
+/// The current time as a FILETIME, the unit the index keeps times in.
+fn now_filetime() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() + 11_644_473_600) * 10_000_000)
+        .unwrap_or(0)
 }

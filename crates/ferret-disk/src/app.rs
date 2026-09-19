@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
-use ferret_tree::{dupes, Kind, NodeId, Totals};
+use ferret_tree::{cleanup, dupes, Kind, NodeId, Totals};
 
 use crate::format;
 use crate::i18n::Lang;
@@ -38,6 +38,42 @@ enum Tab {
     Largest,
     Kinds,
     Duplicates,
+    Cleanup,
+}
+
+/// The cleanup tab: the rules' latest findings and which of them are ticked.
+struct CleanupView {
+    list: Vec<cleanup::Suggestion>,
+    /// Scan generation the list was computed for.
+    generation: Option<u64>,
+    computing: bool,
+    asked: Option<Instant>,
+    /// Rule ids ticked for removal.
+    chosen: HashSet<&'static str>,
+    /// Rule ids whose items are listed.
+    open: HashSet<&'static str>,
+    /// Whether the safe rules have been ticked by default yet.
+    primed: bool,
+}
+
+impl CleanupView {
+    fn new() -> Self {
+        Self {
+            list: Vec::new(),
+            generation: None,
+            computing: false,
+            asked: None,
+            chosen: HashSet::new(),
+            open: HashSet::new(),
+            primed: false,
+        }
+    }
+}
+
+/// A removal waiting for the person to say yes.
+struct Confirm {
+    paths: Vec<String>,
+    bytes: u64,
 }
 
 /// The duplicates tab: a search that can be running, and what it found.
@@ -51,6 +87,8 @@ struct DupesView {
     finished: Option<(f64, bool)>,
     collapsed: HashSet<usize>,
     rows: Vec<DupRow>,
+    /// Paths ticked for removal.
+    chosen: HashSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -69,6 +107,7 @@ impl DupesView {
             finished: None,
             collapsed: HashSet::new(),
             rows: Vec::new(),
+            chosen: HashSet::new(),
         }
     }
 
@@ -104,6 +143,11 @@ enum Action {
     Open(String),
     Reveal(String),
     Copy(String),
+    /// Ask to move these to the recycle bin; ytes is what they hold.
+    Recycle {
+        paths: Vec<String>,
+        bytes: u64,
+    },
 }
 
 pub struct DiskApp {
@@ -138,6 +182,9 @@ pub struct DiskApp {
     kinds: Option<(u64, NodeId, Vec<(Kind, Totals)>, Vec<(String, Totals)>)>,
 
     dupes: DupesView,
+    cleanup: CleanupView,
+    confirm: Option<Confirm>,
+    recycling: bool,
 
     toast: Option<(String, Instant)>,
     title: String,
@@ -196,6 +243,9 @@ impl DiskApp {
             largest: None,
             kinds: None,
             dupes: DupesView::new(),
+            cleanup: CleanupView::new(),
+            confirm: None,
+            recycling: false,
             toast: None,
             title: String::new(),
             shot: screenshot.map(|(path, tab)| Shot {
@@ -237,6 +287,10 @@ impl DiskApp {
             match shot.tab.as_deref() {
                 Some("largest") => self.tab = Tab::Largest,
                 Some("kinds") => self.tab = Tab::Kinds,
+                Some("cleanup") => {
+                    self.tab = Tab::Cleanup;
+                    settled = self.cleanup.generation.is_some() && !self.cleanup.computing;
+                }
                 Some("duplicates") => {
                     self.tab = Tab::Duplicates;
                     if self.dupes.cancel.is_none() && self.dupes.finished.is_none() {
@@ -371,6 +425,8 @@ impl DiskApp {
                     let min_size = self.dupes.min_size;
                     self.dupes = DupesView::new();
                     self.dupes.min_size = min_size;
+                    self.cleanup.list.clear();
+                    self.cleanup.generation = None;
                     self.worker.send(Request::Drives);
                 }
                 Event::Scanned(letter, Err(message)) => {
@@ -381,6 +437,46 @@ impl DiskApp {
                     };
                 }
                 Event::Changed => self.after_change(),
+                Event::Suggestions { generation, list } => {
+                    self.cleanup.computing = false;
+                    self.cleanup.generation = Some(generation);
+                    if !self.cleanup.primed {
+                        // Tick what cannot hurt; the rest waits for a decision.
+                        self.cleanup.chosen = list
+                            .iter()
+                            .filter(|s| {
+                                s.rule.safety == cleanup::Safety::Safe
+                                    && s.rule.mode != cleanup::Mode::Info
+                            })
+                            .map(|s| s.rule.id)
+                            .collect();
+                        self.cleanup.primed = true;
+                    }
+                    self.cleanup.list = list;
+                }
+                Event::Recycled { result, bytes } => {
+                    self.recycling = false;
+                    // Whatever went is no longer a duplicate of anything.
+                    self.dupes
+                        .chosen
+                        .retain(|p| std::fs::symlink_metadata(p).is_ok());
+                    for group in &mut self.dupes.groups {
+                        group
+                            .files
+                            .retain(|f| std::fs::symlink_metadata(&f.path).is_ok());
+                    }
+                    self.dupes.groups.retain(|g| g.files.len() > 1);
+                    self.dupes.relayout();
+                    // Ask the rules again once the watcher has caught up.
+                    self.cleanup.generation = None;
+                    self.cleanup.asked = None;
+                    let text = self.lang.recycled(
+                        result.gone,
+                        result.requested,
+                        &format::size(self.lang, bytes),
+                    );
+                    self.inform(text);
+                }
                 Event::DupesProgress(progress) => {
                     if self.dupes.cancel.is_some() {
                         self.dupes.progress = Some(progress);
@@ -519,6 +615,11 @@ impl DiskApp {
                 }
                 Action::Open(path) => self.worker.send(Request::Open(path)),
                 Action::Reveal(path) => self.worker.send(Request::Reveal(path)),
+                Action::Recycle { paths, bytes } => {
+                    if !paths.is_empty() && !self.recycling {
+                        self.confirm = Some(Confirm { paths, bytes });
+                    }
+                }
                 Action::Copy(path) => {
                     ctx.copy_text(path);
                     self.inform(self.lang.strings().copied.to_string());
@@ -568,6 +669,7 @@ impl eframe::App for DiskApp {
                 self.left_panel(ui, scan, &mut actions);
                 self.map_panel(ui, scan, &mut actions);
                 self.apply(actions, scan, ui.ctx());
+                self.confirm_dialog(ui.ctx());
                 self.refresh_title(ui.ctx(), Some(scan));
             }
             _ => {
@@ -892,6 +994,7 @@ impl DiskApp {
                     ui.selectable_value(&mut self.tab, Tab::Largest, strings.tab_largest);
                     ui.selectable_value(&mut self.tab, Tab::Kinds, strings.tab_kinds);
                     ui.selectable_value(&mut self.tab, Tab::Duplicates, strings.tab_duplicates);
+                    ui.selectable_value(&mut self.tab, Tab::Cleanup, self.lang.words().tab_cleanup);
                 });
                 ui.add_space(4.0);
                 match self.tab {
@@ -899,6 +1002,7 @@ impl DiskApp {
                     Tab::Largest => self.largest(ui, scan, actions),
                     Tab::Kinds => self.kinds(ui, scan),
                     Tab::Duplicates => self.duplicates(ui, scan, actions),
+                    Tab::Cleanup => self.cleanup_tab(ui, scan, actions),
                 }
             });
     }
@@ -1306,10 +1410,70 @@ impl DiskApp {
             }
         }
 
+        // Removal: tick copies by hand, or keep one per group and tick the rest.
+        let protected = |node: NodeId| {
+            !scan.tree.contains(node) || cleanup::is_protected(&scan.index, &scan.tree, node)
+        };
+        if !running && !self.dupes.groups.is_empty() {
+            let words = lang.words();
+            ui.horizontal(|ui| {
+                if ui.small_button(words.keep_one).clicked() {
+                    self.dupes.chosen.clear();
+                    for group in &self.dupes.groups {
+                        // Keep the copy with the shortest path — usually the
+                        // original, the others being copies made into deeper
+                        // folders.
+                        let keep = group
+                            .files
+                            .iter()
+                            .min_by_key(|f| (f.path.len(), f.path.clone()));
+                        for file in &group.files {
+                            if Some(file) != keep && !protected(file.node) {
+                                self.dupes.chosen.insert(file.path.clone());
+                            }
+                        }
+                    }
+                }
+                if !self.dupes.chosen.is_empty() && ui.small_button(words.clear_selection).clicked()
+                {
+                    self.dupes.chosen.clear();
+                }
+            });
+            let chosen: Vec<&dupes::Candidate> = self
+                .dupes
+                .groups
+                .iter()
+                .flat_map(|g| g.files.iter())
+                .filter(|f| self.dupes.chosen.contains(&f.path))
+                .collect();
+            if !chosen.is_empty() {
+                let bytes: u64 = chosen
+                    .iter()
+                    .map(|f| scan.tree.totals(f.node).allocated)
+                    .sum();
+                let label = format!(
+                    "{}  ({})",
+                    words.recycle_selected,
+                    lang.recycle_count(chosen.len(), &format::size(lang, bytes))
+                );
+                if ui
+                    .add_enabled(!self.recycling, egui::Button::new(label))
+                    .clicked()
+                {
+                    actions.push(Action::Recycle {
+                        paths: chosen.iter().map(|f| f.path.clone()).collect(),
+                        bytes,
+                    });
+                }
+            }
+            ui.add_space(4.0);
+        }
+
         let groups = &self.dupes.groups;
         let rows = &self.dupes.rows;
         let selected = self.selected;
         let mut toggled = None;
+        let mut ticked: Option<(String, bool)> = None;
         TableBuilder::new(ui)
             .id_salt("duplicates")
             .striped(false)
@@ -1354,7 +1518,18 @@ impl DiskApp {
                             let (folder, name) =
                                 file.path.rsplit_once('\\').unwrap_or(("", &file.path));
                             table_row.col(|ui| {
-                                ui.add_space(22.0);
+                                if protected(file.node) {
+                                    ui.add_space(22.0);
+                                    ui.label(
+                                        egui::RichText::new("🔒").small().color(palette.muted),
+                                    )
+                                    .on_hover_text(lang.words().protected);
+                                } else {
+                                    let mut on = self.dupes.chosen.contains(&file.path);
+                                    if ui.checkbox(&mut on, "").changed() {
+                                        ticked = Some((file.path.clone(), on));
+                                    }
+                                }
                                 swatch(
                                     ui,
                                     self.theme,
@@ -1399,6 +1574,13 @@ impl DiskApp {
                     }
                 });
             });
+        if let Some((path, on)) = ticked {
+            if on {
+                self.dupes.chosen.insert(path);
+            } else {
+                self.dupes.chosen.remove(&path);
+            }
+        }
         if let Some(g) = toggled {
             if !self.dupes.collapsed.remove(&g) {
                 self.dupes.collapsed.insert(g);
@@ -1406,6 +1588,331 @@ impl DiskApp {
             self.dupes.relayout();
         }
     }
+}
+
+impl DiskApp {
+    fn cleanup_tab(&mut self, ui: &mut egui::Ui, scan: &Scan, actions: &mut Vec<Action>) {
+        let palette = theme::palette(self.theme);
+        let lang = self.lang;
+        let words = lang.words();
+
+        // The rules walk the whole tree, so they run on the worker, and at
+        // most every few seconds while the disk is changing underneath.
+        let stale = self.cleanup.generation != Some(scan.generation);
+        let rested = self
+            .cleanup
+            .asked
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(8));
+        if stale && rested && !self.cleanup.computing {
+            if let Some(shared) = self.scan.clone() {
+                self.cleanup.computing = true;
+                self.cleanup.asked = Some(Instant::now());
+                self.worker.send(Request::Suggest(shared));
+            }
+        }
+
+        ui.label(egui::RichText::new(words.cleanup_intro).color(palette.muted));
+        ui.add_space(6.0);
+        if self.cleanup.generation.is_none() {
+            waiting(ui, words.computing, "", None);
+            return;
+        }
+        if self.cleanup.list.is_empty() {
+            ui.label(words.nothing_found);
+            return;
+        }
+
+        // What the ticked rules would remove.
+        let chosen: Vec<&cleanup::Suggestion> = self
+            .cleanup
+            .list
+            .iter()
+            .filter(|s| {
+                s.rule.mode != cleanup::Mode::Info && self.cleanup.chosen.contains(s.rule.id)
+            })
+            .collect();
+        let chosen_bytes: u64 = chosen.iter().map(|s| s.bytes).sum();
+        ui.horizontal(|ui| {
+            let enabled = !chosen.is_empty() && !self.recycling;
+            let label = format!(
+                "{}  ({})",
+                words.recycle_selected,
+                format::size(lang, chosen_bytes)
+            );
+            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                let paths = removal_paths(scan, &chosen);
+                actions.push(Action::Recycle {
+                    paths,
+                    bytes: chosen_bytes,
+                });
+            }
+            if self.recycling {
+                ui.spinner();
+                ui.label(egui::RichText::new(words.recycling).color(palette.muted));
+            }
+        });
+        ui.add_space(6.0);
+
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                for safety in [
+                    cleanup::Safety::Safe,
+                    cleanup::Safety::Likely,
+                    cleanup::Safety::Careful,
+                ] {
+                    let in_band: Vec<&cleanup::Suggestion> = self
+                        .cleanup
+                        .list
+                        .iter()
+                        .filter(|s| s.rule.safety == safety)
+                        .collect();
+                    if in_band.is_empty() {
+                        continue;
+                    }
+                    let (title, note) = lang.safety(safety);
+                    let colour = match safety {
+                        cleanup::Safety::Safe => palette.accent,
+                        cleanup::Safety::Likely => palette.text,
+                        cleanup::Safety::Careful => palette.danger,
+                    };
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(title).strong().color(colour));
+                    ui.label(egui::RichText::new(note).small().color(palette.muted));
+                    ui.add_space(2.0);
+
+                    for suggestion in in_band {
+                        let id = suggestion.rule.id;
+                        let (name, explanation) = lang.rule(id);
+                        egui::Frame::NONE
+                            .fill(palette.panel)
+                            .corner_radius(6)
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    if suggestion.rule.mode == cleanup::Mode::Info {
+                                        ui.add_space(22.0);
+                                    } else {
+                                        let mut on = self.cleanup.chosen.contains(id);
+                                        if ui.checkbox(&mut on, "").changed() {
+                                            if on {
+                                                self.cleanup.chosen.insert(id);
+                                            } else {
+                                                self.cleanup.chosen.remove(id);
+                                            }
+                                        }
+                                    }
+                                    ui.label(egui::RichText::new(name).strong());
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.label(
+                                                egui::RichText::new(format::size(
+                                                    lang,
+                                                    suggestion.bytes,
+                                                ))
+                                                .strong(),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.label(
+                                    egui::RichText::new(explanation)
+                                        .small()
+                                        .color(palette.muted),
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(lang.files(suggestion.files as u64))
+                                            .small()
+                                            .color(palette.muted),
+                                    );
+                                    match id {
+                                        "recycle_bin" => {
+                                            if ui.small_button(words.open_recycle_bin).clicked() {
+                                                self.worker.send(Request::OpenRecycleBin);
+                                            }
+                                        }
+                                        "windows_old" => {
+                                            if ui.small_button(words.open_disk_cleanup).clicked() {
+                                                self.worker.send(Request::OpenDiskCleanup);
+                                            }
+                                        }
+                                        "hibernation" => {
+                                            if ui.small_button(words.copy_command).clicked() {
+                                                ui.ctx().copy_text("powercfg /h off".into());
+                                                self.toast = Some((
+                                                    words.command_copied.to_string(),
+                                                    Instant::now(),
+                                                ));
+                                            }
+                                        }
+                                        _ => {
+                                            let open = self.cleanup.open.contains(id);
+                                            let arrow = if open { "⏷" } else { "⏵" };
+                                            if ui
+                                                .small_button(format!(
+                                                    "{arrow} {}",
+                                                    words.show_items
+                                                ))
+                                                .clicked()
+                                            {
+                                                if open {
+                                                    self.cleanup.open.remove(id);
+                                                } else {
+                                                    self.cleanup.open.insert(id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                                if self.cleanup.open.contains(id) {
+                                    for &target in suggestion.targets.iter().take(50) {
+                                        if !scan.tree.contains(target) {
+                                            continue;
+                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(22.0);
+                                            let path = scan.tree.path(&scan.index, target);
+                                            let size = format::size(
+                                                lang,
+                                                scan.tree.totals(target).allocated,
+                                            );
+                                            let response = ui.add(
+                                                egui::Label::new(egui::RichText::new(path).small())
+                                                    .truncate()
+                                                    .sense(egui::Sense::click()),
+                                            );
+                                            if response.clicked() {
+                                                actions.push(Action::Select {
+                                                    node: target,
+                                                    from_map: false,
+                                                });
+                                            }
+                                            response.context_menu(|ui| {
+                                                node_menu(ui, lang, scan, target, actions)
+                                            });
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(size)
+                                                            .small()
+                                                            .color(palette.muted),
+                                                    );
+                                                },
+                                            );
+                                        });
+                                    }
+                                    if suggestion.targets.len() > 50 {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "… +{}",
+                                                suggestion.targets.len() - 50
+                                            ))
+                                            .small()
+                                            .color(palette.muted),
+                                        );
+                                    }
+                                }
+                            });
+                        ui.add_space(4.0);
+                    }
+                }
+            });
+    }
+
+    /// The "are you sure" for any removal, from anywhere in the window.
+    fn confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(confirm) = &self.confirm else { return };
+        let lang = self.lang;
+        let words = lang.words();
+        let palette = theme::palette(self.theme);
+        let mut decided: Option<bool> = None;
+
+        let modal = egui::Modal::new(egui::Id::new("confirm-recycle")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.label(egui::RichText::new(words.confirm_title).heading());
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(
+                    lang.recycle_count(confirm.paths.len(), &format::size(lang, confirm.bytes)),
+                )
+                .strong(),
+            );
+            ui.add_space(4.0);
+            for path in confirm.paths.iter().take(6) {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(path).small().color(palette.muted))
+                        .truncate(),
+                );
+            }
+            if confirm.paths.len() > 6 {
+                ui.label(
+                    egui::RichText::new(format!("… +{}", confirm.paths.len() - 6))
+                        .small()
+                        .color(palette.muted),
+                );
+            }
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(words.confirm_detail).small());
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(egui::RichText::new(words.confirm_action).strong())
+                    .clicked()
+                {
+                    decided = Some(true);
+                }
+                if ui.button(words.cancel).clicked() {
+                    decided = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && decided.is_none() {
+            decided = Some(false);
+        }
+        match decided {
+            Some(true) => {
+                if let Some(confirm) = self.confirm.take() {
+                    self.recycling = true;
+                    self.worker.send(Request::Recycle {
+                        paths: confirm.paths,
+                        bytes: confirm.bytes,
+                    });
+                }
+            }
+            Some(false) => self.confirm = None,
+            None => {}
+        }
+    }
+}
+
+/// The paths to hand the recycle bin for a set of suggestions: a cache
+/// folder's contents, or the matched thing itself.
+fn removal_paths(scan: &Scan, chosen: &[&cleanup::Suggestion]) -> Vec<String> {
+    let tree = &scan.tree;
+    let mut paths = Vec::new();
+    for suggestion in chosen {
+        for &target in &suggestion.targets {
+            if !tree.contains(target) {
+                continue;
+            }
+            match suggestion.rule.mode {
+                cleanup::Mode::Contents => {
+                    paths.extend(
+                        tree.children(target)
+                            .iter()
+                            .map(|c| tree.path(&scan.index, *c)),
+                    );
+                }
+                cleanup::Mode::Itself => paths.push(tree.path(&scan.index, target)),
+                cleanup::Mode::Info => {}
+            }
+        }
+    }
+    paths
 }
 
 /* -------------------------------------------------------------------- *
@@ -1644,6 +2151,18 @@ fn node_menu(ui: &mut egui::Ui, lang: Lang, scan: &Scan, node: NodeId, actions: 
     }
     if scan.tree.is_dir(node) && ui.button(strings.menu_zoom).clicked() {
         actions.push(Action::Focus(node));
+        ui.close();
+    }
+    ui.separator();
+    let words = lang.words();
+    let protected = cleanup::is_protected(&scan.index, &scan.tree, node);
+    let button = ui.add_enabled(!protected, egui::Button::new(words.menu_recycle));
+    let button = button.on_disabled_hover_text(words.protected);
+    if button.clicked() {
+        actions.push(Action::Recycle {
+            paths: vec![path],
+            bytes: scan.tree.totals(node).allocated,
+        });
         ui.close();
     }
 }

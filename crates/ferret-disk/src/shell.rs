@@ -171,6 +171,78 @@ pub fn stat(path: &str) -> Option<ferret_core::FileStat> {
     })
 }
 
+/// What sending files to the recycle bin achieved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Recycled {
+    pub requested: usize,
+    /// Paths that no longer exist afterwards.
+    pub gone: usize,
+    /// The person cancelled a prompt Windows showed.
+    pub aborted: bool,
+}
+
+/// Move paths to the recycle bin. Never deletes permanently on its own.
+///
+/// `FOF_ALLOWUNDO` is what makes this the recycle bin rather than a delete.
+/// `FOF_NOCONFIRMATION` skips the "are you sure" the window already asked,
+/// but `FOF_WANTNUKEWARNING` takes one case back from it: a file too large
+/// for the recycle bin would otherwise be destroyed silently — with this
+/// flag, Windows asks first.
+///
+/// Files in use are left where they are; the count of what actually went
+/// is measured afterwards rather than trusted from the call.
+pub fn recycle(paths: &[String]) -> Recycled {
+    use windows_sys::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+        FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW,
+    };
+
+    let mut result = Recycled {
+        requested: paths.len(),
+        ..Recycled::default()
+    };
+    // In chunks, so one failing file does not hold back thousands of others,
+    // and so the double-null list stays a sensible size.
+    for chunk in paths.chunks(500) {
+        // A list of null-terminated paths, ended by an extra null.
+        let mut list: Vec<u16> = Vec::new();
+        for path in chunk {
+            list.extend(std::ffi::OsStr::new(path).encode_wide());
+            list.push(0);
+        }
+        list.push(0);
+
+        let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+        op.wFunc = FO_DELETE;
+        op.pFrom = list.as_ptr();
+        op.fFlags =
+            (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING | FOF_SILENT | FOF_NOERRORUI)
+                as u16;
+        unsafe { SHFileOperationW(&mut op) };
+        if op.fAnyOperationsAborted != 0 {
+            result.aborted = true;
+        }
+    }
+    result.gone = paths
+        .iter()
+        .filter(|p| std::fs::symlink_metadata(p).is_err())
+        .count();
+    result
+}
+
+/// Open the recycle bin in Explorer, so the person can empty it themselves.
+pub fn open_recycle_bin() -> Result<(), String> {
+    open("shell:RecycleBinFolder")
+}
+
+/// Windows' own Disk Cleanup, which is what removes `Windows.old` properly.
+pub fn open_disk_cleanup() -> Result<(), String> {
+    Command::new("cleanmgr")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("open_failed:{e}"))
+}
+
 /// Open a file or folder with its default handler.
 pub fn open(path: &str) -> Result<(), String> {
     Command::new("explorer")
