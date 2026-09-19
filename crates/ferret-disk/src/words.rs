@@ -31,6 +31,15 @@ pub struct Words {
     pub copy_command: &'static str,
     pub command_copied: &'static str,
     pub show_items: &'static str,
+
+    pub tab_changes: &'static str,
+    pub changes_intro: &'static str,
+    pub first_snapshot: &'static str,
+    pub compare_with: &'static str,
+    pub used_space_change: &'static str,
+    pub no_changes: &'static str,
+    pub col_change: &'static str,
+    pub col_then_now: &'static str,
 }
 
 const TR: Words = Words {
@@ -64,6 +73,18 @@ const TR: Words = Words {
     copy_command: "Komutu kopyala",
     command_copied: "Komut kopyalandı. Yönetici olarak açılmış bir komut isteminde çalıştırın.",
     show_items: "Neler var?",
+
+    tab_changes: "Değişenler",
+    changes_intro: concat!(
+        "Her taramadan sonra klasör boyutları kaydedilir. Eski bir kayıtla bugünü karşılaştırıp neyin büyüdüğünü ",
+        "görün. Liste, büyümenin gerçekten olduğu klasöre iner: C:\\Users değil, içinde şişen klasör."
+    ),
+    first_snapshot: "Bu disk için ilk kayıt şimdi alındı. Bir sonraki taramada neyin büyüdüğünü burada göreceksiniz.",
+    compare_with: "Karşılaştır:",
+    used_space_change: "kullanılan alan",
+    no_changes: "10 MB'tan büyük bir değişiklik yok.",
+    col_change: "Değişim",
+    col_then_now: "Önce → şimdi",
 };
 
 const EN: Words = Words {
@@ -97,6 +118,18 @@ const EN: Words = Words {
     copy_command: "Copy the command",
     command_copied: "Command copied. Run it in a command prompt opened as administrator.",
     show_items: "What's in it?",
+
+    tab_changes: "Changes",
+    changes_intro: concat!(
+        "Folder sizes are recorded after every scan. Compare an earlier record with today to see what grew. ",
+        "The list goes down to where the growth actually happened: not C:\\Users, but the folder inside it that swelled."
+    ),
+    first_snapshot: "The first record for this disk has just been taken. Next time you scan, what grew will show here.",
+    compare_with: "Compare with:",
+    used_space_change: "used space",
+    no_changes: "No change larger than 10 MB.",
+    col_change: "Change",
+    col_then_now: "Then → now",
 };
 
 impl Lang {

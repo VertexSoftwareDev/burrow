@@ -12,13 +12,14 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
-use ferret_tree::{cleanup, dupes, Kind, NodeId, Totals};
+use ferret_tree::{cleanup, dupes, snapshot, Kind, NodeId, Totals};
 
 use crate::format;
 use crate::i18n::Lang;
 use crate::prefs::{self, Metric, Prefs};
 use crate::rows::{self, Row};
 use crate::shell::{self, Drive};
+use crate::snapshots;
 use crate::theme::{self, Theme, ROW_HEIGHT};
 use crate::treemap::{self, Layout, What};
 use crate::worker::{Event, Request, Scan, SharedScan, Worker};
@@ -39,6 +40,31 @@ enum Tab {
     Kinds,
     Duplicates,
     Cleanup,
+    Changes,
+}
+
+/// The changes tab: saved snapshots, which one is compared, and the result.
+struct ChangesView {
+    saved: Vec<snapshots::Saved>,
+    chosen: Option<std::path::PathBuf>,
+    result: Option<(snapshots::Saved, u64, Vec<snapshot::Change>)>,
+    /// (generation, snapshot) the result was computed for.
+    computed_for: Option<(u64, std::path::PathBuf)>,
+    computing: bool,
+    asked: Option<Instant>,
+}
+
+impl ChangesView {
+    fn new() -> Self {
+        Self {
+            saved: Vec::new(),
+            chosen: None,
+            result: None,
+            computed_for: None,
+            computing: false,
+            asked: None,
+        }
+    }
 }
 
 /// The cleanup tab: the rules' latest findings and which of them are ticked.
@@ -183,6 +209,9 @@ pub struct DiskApp {
 
     dupes: DupesView,
     cleanup: CleanupView,
+    changes: ChangesView,
+    /// When the current scan finished, in Unix seconds.
+    scanned_at: u64,
     confirm: Option<Confirm>,
     recycling: bool,
 
@@ -244,6 +273,8 @@ impl DiskApp {
             kinds: None,
             dupes: DupesView::new(),
             cleanup: CleanupView::new(),
+            changes: ChangesView::new(),
+            scanned_at: 0,
             confirm: None,
             recycling: false,
             toast: None,
@@ -287,6 +318,10 @@ impl DiskApp {
             match shot.tab.as_deref() {
                 Some("largest") => self.tab = Tab::Largest,
                 Some("kinds") => self.tab = Tab::Kinds,
+                Some("changes") => {
+                    self.tab = Tab::Changes;
+                    settled = self.changes.result.is_some() && !self.changes.computing;
+                }
                 Some("cleanup") => {
                     self.tab = Tab::Cleanup;
                     settled = self.cleanup.generation.is_some() && !self.cleanup.computing;
@@ -427,7 +462,15 @@ impl DiskApp {
                     self.dupes.min_size = min_size;
                     self.cleanup.list.clear();
                     self.cleanup.generation = None;
+                    self.changes = ChangesView::new();
+                    self.scanned_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
                     self.worker.send(Request::Drives);
+                    // What was saved before this scan; this scan's own record
+                    // follows once it is written.
+                    self.worker.send(Request::ListSnapshots(self.letter));
                 }
                 Event::Scanned(letter, Err(message)) => {
                     self.phase = if message == "needs_elevation" {
@@ -437,6 +480,27 @@ impl DiskApp {
                     };
                 }
                 Event::Changed => self.after_change(),
+                Event::Snapshots(saved) => {
+                    if self.changes.chosen.is_none() {
+                        // Compare with the last scan before this one; if this is
+                        // the first, with this scan itself, which still shows what
+                        // changed live since.
+                        let before = saved
+                            .iter()
+                            .find(|s| s.taken + 60 < self.scanned_at)
+                            .or(saved.first());
+                        self.changes.chosen = before.map(|s| s.path.clone());
+                    }
+                    self.changes.saved = saved;
+                }
+                Event::Compared {
+                    saved,
+                    used_now,
+                    changes,
+                } => {
+                    self.changes.computing = false;
+                    self.changes.result = Some((saved, used_now, changes));
+                }
                 Event::Suggestions { generation, list } => {
                     self.cleanup.computing = false;
                     self.cleanup.generation = Some(generation);
@@ -995,6 +1059,7 @@ impl DiskApp {
                     ui.selectable_value(&mut self.tab, Tab::Kinds, strings.tab_kinds);
                     ui.selectable_value(&mut self.tab, Tab::Duplicates, strings.tab_duplicates);
                     ui.selectable_value(&mut self.tab, Tab::Cleanup, self.lang.words().tab_cleanup);
+                    ui.selectable_value(&mut self.tab, Tab::Changes, self.lang.words().tab_changes);
                 });
                 ui.add_space(4.0);
                 match self.tab {
@@ -1003,6 +1068,7 @@ impl DiskApp {
                     Tab::Kinds => self.kinds(ui, scan),
                     Tab::Duplicates => self.duplicates(ui, scan, actions),
                     Tab::Cleanup => self.cleanup_tab(ui, scan, actions),
+                    Tab::Changes => self.changes_tab(ui, scan, actions),
                 }
             });
     }
@@ -1886,6 +1952,204 @@ impl DiskApp {
             Some(false) => self.confirm = None,
             None => {}
         }
+    }
+}
+
+impl DiskApp {
+    fn changes_tab(&mut self, ui: &mut egui::Ui, scan: &Scan, actions: &mut Vec<Action>) {
+        let palette = theme::palette(self.theme);
+        let lang = self.lang;
+        let words = lang.words();
+
+        ui.label(egui::RichText::new(words.changes_intro).color(palette.muted));
+        ui.add_space(6.0);
+        if self.changes.saved.is_empty() {
+            ui.label(words.first_snapshot);
+            return;
+        }
+
+        // Which snapshot to compare with.
+        let mut chosen = self.changes.chosen.clone();
+        let label = |s: &snapshots::Saved| {
+            format!(
+                "{}  ·  {} {}",
+                shell::local_time(s.taken),
+                format::size(lang, s.used),
+                lang.strings().used
+            )
+        };
+        let current = self
+            .changes
+            .saved
+            .iter()
+            .find(|s| Some(&s.path) == chosen.as_ref())
+            .map(label)
+            .unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(words.compare_with).color(palette.muted));
+            egui::ComboBox::from_id_salt("snapshot")
+                .width(300.0)
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for s in &self.changes.saved {
+                        ui.selectable_value(&mut chosen, Some(s.path.clone()), label(s));
+                    }
+                });
+        });
+        if chosen != self.changes.chosen {
+            self.changes.chosen = chosen;
+            self.changes.result = None;
+            self.changes.computed_for = None;
+            self.changes.asked = None;
+        }
+
+        // Compare on the worker; again when the disk has moved on, but not
+        // more often than every few seconds.
+        let Some(path) = self.changes.chosen.clone() else {
+            return;
+        };
+        let want = (scan.generation, path.clone());
+        let rested = self
+            .changes
+            .asked
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(8));
+        if self.changes.computed_for.as_ref() != Some(&want) && rested && !self.changes.computing {
+            if let (Some(shared), Some(saved)) = (
+                self.scan.clone(),
+                self.changes.saved.iter().find(|s| s.path == path).cloned(),
+            ) {
+                self.changes.computing = true;
+                self.changes.asked = Some(Instant::now());
+                self.changes.computed_for = Some(want);
+                self.worker.send(Request::Compare {
+                    scan: shared,
+                    saved,
+                });
+            }
+        }
+
+        let Some((saved, used_now, list)) = &self.changes.result else {
+            waiting(ui, words.computing, "", None);
+            return;
+        };
+
+        let delta = *used_now as i64 - saved.used as i64;
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "{} → {}",
+                format::size(lang, saved.used),
+                format::size(lang, *used_now)
+            ));
+            ui.label(
+                egui::RichText::new(signed(lang, delta))
+                    .strong()
+                    .color(change_colour(palette, delta)),
+            );
+            ui.label(egui::RichText::new(words.used_space_change).color(palette.muted));
+        });
+        ui.add_space(6.0);
+        if list.is_empty() {
+            ui.label(egui::RichText::new(words.no_changes).color(palette.muted));
+            return;
+        }
+
+        let largest = list
+            .iter()
+            .map(|c| c.delta().unsigned_abs())
+            .max()
+            .unwrap_or(1);
+        let selected = self.selected;
+        TableBuilder::new(ui)
+            .id_salt("changes")
+            .striped(true)
+            .sense(egui::Sense::click())
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::initial(96.0).at_least(80.0))
+            .column(Column::initial(90.0).at_least(40.0))
+            .column(Column::remainder().at_least(160.0).clip(true))
+            .column(Column::initial(150.0).at_least(100.0).clip(true))
+            .min_scrolled_height(0.0)
+            .header(24.0, |mut header| {
+                let strings = lang.strings();
+                for (label, right) in [
+                    (words.col_change, true),
+                    ("", false),
+                    (strings.col_folder, false),
+                    (words.col_then_now, false),
+                ] {
+                    header.col(|ui| heading(ui, label, right, palette));
+                }
+            })
+            .body(|body| {
+                body.rows(ROW_HEIGHT, list.len(), |mut row| {
+                    let change = &list[row.index()];
+                    let d = change.delta();
+                    let node = snapshot::find(&scan.index, &scan.tree, &change.path);
+                    row.set_selected(node.is_some() && node == selected);
+                    row.col(|ui| right_label(ui, &signed(lang, d), change_colour(palette, d)));
+                    row.col(|ui| {
+                        let width = ui.available_width().min(80.0);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(width, 6.0), egui::Sense::hover());
+                        let share = d.unsigned_abs() as f32 / largest as f32;
+                        let bar = egui::Rect::from_min_size(
+                            rect.min,
+                            egui::vec2((width * share).max(2.0), 6.0),
+                        );
+                        ui.painter()
+                            .rect_filled(bar, 3.0, change_colour(palette, d));
+                    });
+                    row.col(|ui| {
+                        let text = if node.is_some() {
+                            egui::RichText::new(&change.path)
+                        } else {
+                            // Gone since: shown, but it cannot be selected.
+                            egui::RichText::new(&change.path)
+                                .color(palette.muted)
+                                .strikethrough()
+                        };
+                        ui.add(egui::Label::new(text).selectable(false).truncate());
+                    });
+                    row.col(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} → {}",
+                                format::size(lang, change.before),
+                                format::size(lang, change.after)
+                            ))
+                            .small()
+                            .color(palette.muted),
+                        );
+                    });
+                    let response = row.response();
+                    if let Some(node) = node {
+                        if response.clicked() {
+                            actions.push(Action::Select {
+                                node,
+                                from_map: false,
+                            });
+                        }
+                        response.context_menu(|ui| node_menu(ui, lang, scan, node, actions));
+                    }
+                });
+            });
+    }
+}
+
+/// `+8,2 GB` / `−1,1 GB`.
+fn signed(lang: Lang, delta: i64) -> String {
+    let sign = if delta >= 0 { "+" } else { "−" };
+    format!("{sign}{}", format::size(lang, delta.unsigned_abs()))
+}
+
+/// Growth is what fills a disk, so it takes the warning colour; shrinkage
+/// the accent.
+fn change_colour(palette: &theme::Palette, delta: i64) -> egui::Color32 {
+    if delta > 0 {
+        palette.danger
+    } else {
+        palette.accent
     }
 }
 

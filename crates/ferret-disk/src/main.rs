@@ -14,6 +14,7 @@ mod prefs;
 mod rows;
 mod selftest;
 mod shell;
+mod snapshots;
 mod theme;
 mod treemap;
 mod watch;

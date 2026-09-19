@@ -243,6 +243,36 @@ pub fn open_disk_cleanup() -> Result<(), String> {
         .map_err(|e| format!("open_failed:{e}"))
 }
 
+/// Unix seconds as `YYYY-MM-DD HH:MM` in the computer's own time zone.
+pub fn local_time(unix: u64) -> String {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::Storage::FileSystem::FileTimeToLocalFileTime;
+
+    let ticks = (unix + 11_644_473_600) * 10_000_000;
+    let utc = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut local = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let ok = unsafe { FileTimeToLocalFileTime(&utc, &mut local) } != 0;
+    let ticks = if ok {
+        ((local.dwHighDateTime as u64) << 32) | local.dwLowDateTime as u64
+    } else {
+        ticks
+    };
+    let seconds = (ticks / 10_000_000).saturating_sub(11_644_473_600);
+    let minutes = (seconds % 86_400) / 60;
+    format!(
+        "{} {:02}:{:02}",
+        crate::format::date(ticks),
+        minutes / 60,
+        minutes % 60
+    )
+}
+
 /// Open a file or folder with its default handler.
 pub fn open(path: &str) -> Result<(), String> {
     Command::new("explorer")

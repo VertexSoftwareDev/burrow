@@ -11,10 +11,11 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use ferret_core::{Index, ScanOptions};
-use ferret_tree::{cleanup, dupes, Tree};
+use ferret_tree::{cleanup, dupes, snapshot, Tree};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::shell::{self, Drive};
+use crate::snapshots;
 use crate::watch::{self, WatchEvent};
 use ferret_core::journal::{self, Cursor};
 
@@ -66,6 +67,13 @@ pub enum Request {
     },
     OpenRecycleBin,
     OpenDiskCleanup,
+    /// The saved snapshots of a drive.
+    ListSnapshots(char),
+    /// Compare a saved snapshot with the scan as it is now.
+    Compare {
+        scan: SharedScan,
+        saved: snapshots::Saved,
+    },
 }
 
 pub enum Event {
@@ -81,6 +89,13 @@ pub enum Event {
     /// The change journal can no longer be followed; a rescan is needed.
     Stale,
     DupesProgress(dupes::Progress),
+    Snapshots(Vec<snapshots::Saved>),
+    Compared {
+        saved: snapshots::Saved,
+        /// Used space now, to set against the snapshot's.
+        used_now: u64,
+        changes: Vec<snapshot::Change>,
+    },
     Suggestions {
         generation: u64,
         list: Vec<cleanup::Suggestion>,
@@ -161,6 +176,23 @@ fn run(requests: Receiver<Request>, sink: Sink) {
             Request::Drives => sink.send(Event::Drives(shell::drives())),
             Request::Scan(letter) => {
                 let result = scan(letter, &sink);
+                if let Ok((shared, _)) = &result {
+                    // Record this scan for later comparison, off the worker so
+                    // the window gets its map first.
+                    let shared = shared.clone();
+                    let sink = sink.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("ferret-disk-snapshot".into())
+                        .spawn(move || {
+                            let snap = shared.read().ok().map(|s| {
+                                snapshot::capture(&s.index, &s.tree, s.drive.used(), unix_now())
+                            });
+                            if let Some(snap) = snap {
+                                let _ = snapshots::save(&snap);
+                                sink.send(Event::Snapshots(snapshots::list(letter)));
+                            }
+                        });
+                }
                 if let Ok((shared, Some(cursor))) = &result {
                     let watch_sink = sink.clone();
                     watch::spawn(Arc::downgrade(shared), letter, *cursor, move |event| {
@@ -204,6 +236,21 @@ fn run(requests: Receiver<Request>, sink: Sink) {
             Request::Recycle { paths, bytes } => {
                 let result = shell::recycle(&paths);
                 sink.send(Event::Recycled { result, bytes });
+            }
+            Request::ListSnapshots(letter) => sink.send(Event::Snapshots(snapshots::list(letter))),
+            Request::Compare { scan, saved } => {
+                let now = scan.read().ok().map(|s| {
+                    let used = s.drive.used();
+                    (snapshot::capture(&s.index, &s.tree, used, unix_now()), used)
+                });
+                if let (Some((now, used_now)), Some(then)) = (now, snapshots::load(&saved)) {
+                    let changes = snapshot::diff(&then, &now, 10 << 20);
+                    sink.send(Event::Compared {
+                        saved,
+                        used_now,
+                        changes,
+                    });
+                }
             }
             Request::OpenRecycleBin => {
                 if let Err(err) = shell::open_recycle_bin() {
@@ -313,5 +360,12 @@ fn now_filetime() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| (d.as_secs() + 11_644_473_600) * 10_000_000)
+        .unwrap_or(0)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
         .unwrap_or(0)
 }
