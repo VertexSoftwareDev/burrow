@@ -24,6 +24,9 @@ pub struct Words {
     pub recycling: &'static str,
 
     pub keep_one: &'static str,
+    pub keep_one_tooltip: &'static str,
+    pub app_folder: &'static str,
+    pub app_folder_note: &'static str,
     pub clear_selection: &'static str,
 
     pub open_recycle_bin: &'static str,
@@ -66,6 +69,9 @@ const TR: Words = Words {
     recycling: "Taşınıyor…",
 
     keep_one: "Her grupta birini bırak, gerisini seç",
+    keep_one_tooltip: "Yalnızca bütün kopyaları sizin klasörlerinizde (İndirilenler, Belgeler, Masaüstü…) olan gruplar işaretlenir. Bir uygulamanın klasöründeki kopyalar elle seçilmeli: uygulama dosyayı tam o yoldan kullanıyor olabilir.",
+    app_folder: "uygulama klasörü",
+    app_folder_note: "Bu kopya bir uygulamanın kendi klasöründe (AppData, .minecraft, .gradle…). İçerik aynı olsa da uygulama dosyayı bu yoldan kullanıyor olabilir; silinirse o uygulama bozulabilir.",
     clear_selection: "Seçimi temizle",
 
     open_recycle_bin: "Geri Dönüşüm Kutusu'nu aç",
@@ -111,6 +117,9 @@ const EN: Words = Words {
     recycling: "Moving…",
 
     keep_one: "Keep one in each group, select the rest",
+    keep_one_tooltip: "Only groups whose every copy is in your own folders (Downloads, Documents, Desktop…) are ticked. Copies in an application's folder are for you to pick by hand: the application may use the file from that exact path.",
+    app_folder: "app folder",
+    app_folder_note: "This copy is in an application's own folder (AppData, .minecraft, .gradle…). Even with the same contents, the application may use the file from this path; removing it can break that application.",
     clear_selection: "Clear selection",
 
     open_recycle_bin: "Open the Recycle Bin",

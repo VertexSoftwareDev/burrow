@@ -114,6 +114,28 @@ pub fn candidates(index: &Index, tree: &Tree, min_size: u64) -> Vec<Candidate> {
     out
 }
 
+/// Whether a path lies inside an application's own folder: `AppData`, or a
+/// dot-folder such as `.minecraft`, `.gradle` or `.lmstudio`.
+///
+/// Identical contents do not make such a copy redundant. The application
+/// reads it from that exact path — a launcher's `versions\1.21\1.21.jar`,
+/// an app's bundled tool, an editor's copy of a video it has imported — and
+/// removing it breaks the application even though the same bytes survive
+/// elsewhere. These copies are shown, but never ticked on anyone's behalf.
+pub fn owned_by_an_app(path: &str) -> bool {
+    path.split('\\').any(|part| {
+        part.eq_ignore_ascii_case("appdata") || (part.starts_with('.') && part.len() > 1)
+    })
+}
+
+/// Whether "keep one, remove the rest" may be applied to a group without
+/// asking: only when every copy sits in the person's own folders. A group
+/// with even one application-owned copy is theirs to decide file by file —
+/// removing the others could leave only the copy an app hides away.
+pub fn safe_to_thin(group: &Group) -> bool {
+    !group.files.iter().any(|f| owned_by_an_app(&f.path))
+}
+
 /// Run the three stages. Files that cannot be read (in use, protected,
 /// deleted meanwhile) simply drop out.
 pub fn find(
@@ -402,6 +424,44 @@ mod tests {
         let found = candidates(&index, &tree, 1 << 20);
         let names: Vec<_> = found.iter().map(|c| index.name(c.node as usize)).collect();
         assert_eq!(names, ["keep.bin"]);
+    }
+
+    #[test]
+    fn copies_an_application_uses_are_not_thinned_automatically() {
+        let group = |paths: &[&str]| Group {
+            size: 1,
+            files: paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| Candidate {
+                    node: i as NodeId,
+                    path: p.to_string(),
+                    size: 1,
+                })
+                .collect(),
+        };
+        // A launcher loads each version's jar from its own folder.
+        assert!(!safe_to_thin(&group(&[
+            r"C:\Users\pc\AppData\Roaming\.minecraft\versions\Forge 1.21.11\Forge 1.21.11.jar",
+            r"C:\Users\pc\AppData\Roaming\.minecraft\versions\aa2\aa2.jar",
+        ])));
+        // A video in Downloads and the copy an editor imported into its own
+        // storage: removing the first would leave only the hidden one.
+        assert!(!safe_to_thin(&group(&[
+            r"C:\Users\pc\Downloads\SubVizion_V2.mp4",
+            r"C:\Users\pc\AppData\Local\Packages\Clipchamp\LocalState\00000014",
+        ])));
+        assert!(!safe_to_thin(&group(&[
+            r"C:\Users\pc\.lmstudio\bin\lms.exe",
+            r"C:\Users\pc\lms.exe"
+        ])));
+        // The same photo downloaded twice is exactly what the button is for.
+        assert!(safe_to_thin(&group(&[
+            r"C:\Users\pc\Downloads\IMG_2031.jpg",
+            r"C:\Users\pc\Pictures\Holiday\IMG_2031.jpg",
+        ])));
+        assert!(owned_by_an_app(r"C:\Users\pc\.gradle\caches\x.jar"));
+        assert!(!owned_by_an_app(r"C:\Users\pc\Documents\report.pdf"));
     }
 
     #[test]

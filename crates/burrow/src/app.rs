@@ -1492,9 +1492,16 @@ impl DiskApp {
         if !running && !self.dupes.groups.is_empty() {
             let words = lang.words();
             ui.horizontal(|ui| {
-                if ui.small_button(words.keep_one).clicked() {
+                if ui
+                    .small_button(words.keep_one)
+                    .on_hover_text(words.keep_one_tooltip)
+                    .clicked()
+                {
                     self.dupes.chosen.clear();
-                    for group in &self.dupes.groups {
+                    // Only groups whose every copy is in the person's own
+                    // folders; where an application keeps a copy, it may be
+                    // reading it from that very path.
+                    for group in self.dupes.groups.iter().filter(|g| dupes::safe_to_thin(g)) {
                         // Keep the copy with the shortest path — usually the
                         // original, the others being copies made into deeper
                         // folders.
@@ -1613,6 +1620,14 @@ impl DiskApp {
                                     scan.tree.root(),
                                 );
                                 ui.add(egui::Label::new(name).selectable(false));
+                                if dupes::owned_by_an_app(&file.path) {
+                                    ui.label(
+                                        egui::RichText::new(lang.words().app_folder)
+                                            .small()
+                                            .color(palette.danger),
+                                    )
+                                    .on_hover_text(lang.words().app_folder_note);
+                                }
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(folder).small().color(palette.muted),
