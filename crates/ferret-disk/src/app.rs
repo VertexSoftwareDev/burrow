@@ -2101,15 +2101,31 @@ impl DiskApp {
                             .rect_filled(bar, 3.0, change_colour(palette, d));
                     });
                     row.col(|ui| {
-                        let text = if node.is_some() {
-                            egui::RichText::new(&change.path)
+                        // The folder's own name first: a long path truncated
+                        // from the right would hide exactly the part that
+                        // says which folder it is.
+                        let trimmed = change.path.trim_end_matches('\\');
+                        let (parent, name) = match trimmed.rsplit_once('\\') {
+                            Some((parent, name)) if !name.is_empty() => (parent, name),
+                            _ => ("", change.path.as_str()),
+                        };
+                        let name = if node.is_some() {
+                            egui::RichText::new(name).strong()
                         } else {
                             // Gone since: shown, but it cannot be selected.
-                            egui::RichText::new(&change.path)
+                            egui::RichText::new(name)
                                 .color(palette.muted)
                                 .strikethrough()
                         };
-                        ui.add(egui::Label::new(text).selectable(false).truncate());
+                        ui.add(egui::Label::new(name).selectable(false));
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(parent).small().color(palette.muted),
+                            )
+                            .selectable(false)
+                            .truncate(),
+                        )
+                        .on_hover_text(&change.path);
                     });
                     row.col(|ui| {
                         ui.label(
