@@ -190,22 +190,23 @@ impl<'a> Attribute<'a> {
         self.lowest_vcn() == 0
     }
 
-    /// Bytes this attribute occupies in clusters on the volume.
+    /// Clusters this piece of the attribute occupies on the volume.
     ///
-    /// A resident attribute lives inside its MFT record and takes no clusters
-    /// of its own. A compressed or sparse one stores only part of its
-    /// allocation, and says how much in a trailing field the others lack.
-    pub fn on_disk_size(&self) -> u64 {
-        if !self.non_resident {
-            return 0;
+    /// A resident attribute lives inside its MFT record and takes none. For a
+    /// non-resident one, the run list is the ground truth: holes left by
+    /// compression or sparseness are not storage (see
+    /// [`crate::runs::stored_clusters`]). Unlike the size fields, every piece
+    /// of a split attribute carries its own runs, so pieces add up.
+    pub fn stored_clusters(&self) -> u64 {
+        match self.run_list() {
+            Some(list) => crate::runs::stored_clusters(list),
+            None => 0,
         }
-        let allocated = u64le(self.raw, 0x28);
-        let packed = self.flags() & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_SPARSE) != 0;
-        if packed && self.raw.len() >= 0x48 {
-            u64le(self.raw, 0x40)
-        } else {
-            allocated
-        }
+    }
+
+    /// Whether the attribute's content is compressed or sparse.
+    pub fn is_packed(&self) -> bool {
+        self.flags() & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_SPARSE) != 0
     }
 
     /// Logical size: what a directory listing reports.
@@ -347,8 +348,7 @@ impl StandardInfo {
             flags |= crate::mft::IS_REPARSE;
         }
         // OneDrive and friends: the name is here, the bytes are in the cloud.
-        if self.dos_attributes & (DOS_OFFLINE | DOS_RECALL_ON_OPEN | DOS_RECALL_ON_DATA_ACCESS)
-            != 0
+        if self.dos_attributes & (DOS_OFFLINE | DOS_RECALL_ON_OPEN | DOS_RECALL_ON_DATA_ACCESS) != 0
         {
             flags |= crate::mft::IS_CLOUD;
         }
@@ -477,17 +477,24 @@ mod tests {
         assert!(Namespace::from(3).is_preferred());
     }
 
-    /// A non-resident attribute header with the given sizes and flags.
-    fn non_resident(flags: u16, lowest_vcn: u64, allocated: u64, real: u64, packed: u64) -> Vec<u8> {
+    /// A non-resident attribute header with the given sizes, flags and runs.
+    fn non_resident(
+        flags: u16,
+        lowest_vcn: u64,
+        allocated: u64,
+        real: u64,
+        runs: &[u8],
+    ) -> Vec<u8> {
         let mut raw = vec![0u8; 0x48];
         raw[0..4].copy_from_slice(&ATTR_DATA.to_le_bytes());
-        raw[0x04..0x08].copy_from_slice(&0x48u32.to_le_bytes());
+        raw[0x04..0x08].copy_from_slice(&((0x48 + runs.len()) as u32).to_le_bytes());
         raw[0x08] = 1;
         raw[0x0C..0x0E].copy_from_slice(&flags.to_le_bytes());
         raw[0x10..0x18].copy_from_slice(&lowest_vcn.to_le_bytes());
+        raw[0x20..0x22].copy_from_slice(&0x48u16.to_le_bytes());
         raw[0x28..0x30].copy_from_slice(&allocated.to_le_bytes());
         raw[0x30..0x38].copy_from_slice(&real.to_le_bytes());
-        raw[0x40..0x48].copy_from_slice(&packed.to_le_bytes());
+        raw.extend_from_slice(runs);
         raw
     }
 
@@ -501,27 +508,38 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_file_occupies_its_allocation() {
-        let raw = non_resident(0, 0, 8192, 5000, 0);
+    fn a_plain_file_occupies_its_runs() {
+        // Two clusters at LCN 0x60.
+        let raw = non_resident(0, 0, 8192, 5000, &[0x11, 0x02, 0x60, 0x00]);
         let attr = attribute(&raw);
         assert_eq!(attr.content_size(), 5000);
-        assert_eq!(attr.on_disk_size(), 8192);
+        assert_eq!(attr.stored_clusters(), 2);
         assert!(attr.is_first_piece());
+        assert!(!attr.is_packed());
     }
 
     #[test]
-    fn a_compressed_or_sparse_file_occupies_only_what_it_stores() {
-        let raw = non_resident(ATTR_FLAG_COMPRESSED, 0, 1 << 20, 1 << 20, 64 << 10);
-        assert_eq!(attribute(&raw).on_disk_size(), 64 << 10);
-
-        let raw = non_resident(ATTR_FLAG_SPARSE, 0, 1 << 30, 1 << 30, 0);
-        assert_eq!(attribute(&raw).on_disk_size(), 0);
+    fn a_compressed_file_occupies_only_what_it_stores() {
+        // One 16-cluster compression unit squeezed into 3 clusters + 13 hole.
+        let raw = non_resident(
+            ATTR_FLAG_COMPRESSED,
+            0,
+            16 * 4096,
+            16 * 4096,
+            &[0x11, 0x03, 0x60, 0x01, 0x0D, 0x00],
+        );
+        let attr = attribute(&raw);
+        assert!(attr.is_packed());
+        assert_eq!(attr.stored_clusters(), 3);
     }
 
     #[test]
     fn a_later_piece_is_recognised() {
-        let raw = non_resident(0, 1234, 0, 0, 0);
-        assert!(!attribute(&raw).is_first_piece());
+        let raw = non_resident(0, 1234, 0, 0, &[0x11, 0x04, 0x60, 0x00]);
+        let attr = attribute(&raw);
+        assert!(!attr.is_first_piece());
+        // Its runs still count: pieces add up.
+        assert_eq!(attr.stored_clusters(), 4);
     }
 
     #[test]
@@ -531,7 +549,7 @@ mod tests {
         raw[0x14..0x16].copy_from_slice(&0x18u16.to_le_bytes());
         let attr = attribute(&raw);
         assert_eq!(attr.content_size(), 5);
-        assert_eq!(attr.on_disk_size(), 0);
+        assert_eq!(attr.stored_clusters(), 0);
     }
 
     #[test]

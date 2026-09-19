@@ -1,7 +1,9 @@
-[workspace]
+﻿[workspace]
 resolver = "2"
 members = [
     "crates/ferret-core",
+    "crates/ferret-tree",
+    "crates/ferret-disk-cli",
 ]
 
 [workspace.package]

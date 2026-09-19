@@ -281,7 +281,11 @@ impl Index {
     /// a second ago is still blank on disk; re-reading it would lose almost
     /// every change. Sizes and time are supplied by the caller, which can
     /// stat the path through the normal filesystem and see current data.
-    pub fn apply_change(&mut self, change: &crate::journal::Change, stat: Option<FileStat>) -> Refresh {
+    pub fn apply_change(
+        &mut self,
+        change: &crate::journal::Change,
+        stat: Option<FileStat>,
+    ) -> Refresh {
         let names_before = self.names.len();
 
         let changed = if change.is_delete() {
@@ -565,7 +569,7 @@ pub fn scan_with_progress(
                 match parse_record(raw, sector) {
                     ParseOutcome::Complete(parts) => {
                         stats.records_in_use += 1;
-                        if let Some(parsed) = parts.finish() {
+                        if let Some(parsed) = parts.finish(volume.bytes_per_cluster) {
                             let sink = Sink {
                                 entries: &mut entries,
                                 names: &mut names,
@@ -601,7 +605,7 @@ pub fn scan_with_progress(
     stitched.sort_unstable_by_key(|(number, _)| *number);
     stats.records_stitched = stitched.len() as u64;
     for (number, parts) in stitched {
-        if let Some(parsed) = parts.finish() {
+        if let Some(parsed) = parts.finish(volume.bytes_per_cluster) {
             let sink = Sink {
                 entries: &mut entries,
                 names: &mut names,
@@ -800,11 +804,11 @@ struct Parts {
     /// Human-readable names seen: more than one means hard links.
     links: u32,
     info: Option<record::StandardInfo>,
-    /// `(logical, on disk)` of the unnamed data stream, from its first piece.
-    data: Option<(u64, u64)>,
-    /// Clusters held by everything else: alternate data streams and a
-    /// directory's index.
-    other_on_disk: u64,
+    /// Logical size of the unnamed data stream, from its first piece.
+    data_size: Option<u64>,
+    /// Clusters holding data, summed over every piece of every data stream
+    /// (alternate ones included) and a directory's index.
+    clusters: u64,
 }
 
 impl Parts {
@@ -817,15 +821,15 @@ impl Parts {
         if self.info.is_none() {
             self.info = other.info;
         }
-        if self.data.is_none() {
-            self.data = other.data;
+        if self.data_size.is_none() {
+            self.data_size = other.data_size;
         }
-        self.other_on_disk += other.other_on_disk;
+        self.clusters += other.clusters;
     }
 
     /// Turn the collected pieces into an entry, or `None` for a record with
     /// no name — things like `$MFT`'s own extents.
-    fn finish(self) -> Option<ParsedEntry> {
+    fn finish(self, bytes_per_cluster: u64) -> Option<ParsedEntry> {
         let name = self.name?;
         // A name longer than the arena's length field could not be addressed.
         if name.name.len() > u16::MAX as usize {
@@ -845,15 +849,18 @@ impl Parts {
 
         // `$FILE_NAME` sizes are only refreshed when the directory entry is,
         // so they are the fallback, never the first choice.
-        let (size, data_on_disk) = self
-            .data
-            .unwrap_or((name.real_size, name.allocated_size));
+        let size = self.data_size.unwrap_or(name.real_size);
+        let allocated = if self.data_size.is_some() || self.clusters > 0 {
+            self.clusters * bytes_per_cluster
+        } else {
+            name.allocated_size
+        };
 
         Some(ParsedEntry {
             parent: name.parent as u32,
             name: name.name,
             size,
-            allocated: data_on_disk + self.other_on_disk,
+            allocated,
             modified: self.info.map(|i| i.modified).unwrap_or(0),
             flags,
         })
@@ -866,7 +873,10 @@ enum ParseOutcome {
     /// A base record with an attribute list: more pieces live elsewhere.
     Partial(Parts),
     /// A piece of the file whose base record is `base`.
-    Extension { base: u32, parts: Parts },
+    Extension {
+        base: u32,
+        parts: Parts,
+    },
     /// A record that is not in use, or one Ferret deliberately skips.
     Free,
     Damaged,
@@ -912,19 +922,17 @@ fn parse_record(raw: &mut [u8], bytes_per_sector: usize) -> ParseOutcome {
                     }
                 }
             }
-            // A large attribute is split into pieces across records; only the
-            // first carries its sizes, the rest must not be counted again.
-            ATTR_DATA if attr.is_first_piece() => {
-                if attr.name_len == 0 {
-                    parts.data = Some((attr.content_size(), attr.on_disk_size()));
-                } else {
-                    // Alternate data streams hold real clusters too.
-                    parts.other_on_disk += attr.on_disk_size();
+            ATTR_DATA => {
+                // A large attribute is split into pieces across records; only
+                // the first carries its logical size. Every piece carries its
+                // own runs, though, and alternate data streams hold real
+                // clusters too — so clusters are counted from all of them.
+                if attr.name_len == 0 && attr.is_first_piece() {
+                    parts.data_size = Some(attr.content_size());
                 }
+                parts.clusters += attr.stored_clusters();
             }
-            ATTR_INDEX_ALLOCATION if attr.is_first_piece() => {
-                parts.other_on_disk += attr.on_disk_size();
-            }
+            ATTR_INDEX_ALLOCATION => parts.clusters += attr.stored_clusters(),
             _ => {}
         }
     }
@@ -1368,16 +1376,33 @@ mod tests {
             links: 1,
             ..Parts::default()
         };
-        let extension = Parts {
-            data: Some((40 << 30, 41 << 30)),
+        // First piece of $DATA in one extension record, the rest in another.
+        base.absorb(Parts {
+            data_size: Some(40 << 30),
+            clusters: 6 << 20,
+            ..Parts::default()
+        });
+        base.absorb(Parts {
+            clusters: 4 << 20,
+            ..Parts::default()
+        });
+
+        let entry = base.finish(4096).unwrap();
+        assert_eq!(entry.size, 40 << 30);
+        assert_eq!(entry.allocated, 40 << 30);
+        assert_eq!(entry.flags & IS_HARDLINK, 0);
+    }
+
+    #[test]
+    fn a_resident_file_occupies_no_clusters() {
+        let parts = Parts {
+            name: Some(name(ROOT_RECORD as u64, "tiny.txt", 1)),
+            links: 1,
+            data_size: Some(600),
             ..Parts::default()
         };
-        base.absorb(extension);
-
-        let entry = base.finish().unwrap();
-        assert_eq!(entry.size, 40 << 30);
-        assert_eq!(entry.allocated, 41 << 30);
-        assert_eq!(entry.flags & IS_HARDLINK, 0);
+        let entry = parts.finish(4096).unwrap();
+        assert_eq!((entry.size, entry.allocated), (600, 0));
     }
 
     #[test]
@@ -1387,7 +1412,7 @@ mod tests {
             links: 1,
             ..Parts::default()
         };
-        let entry = parts.finish().unwrap();
+        let entry = parts.finish(4096).unwrap();
         assert_eq!((entry.size, entry.allocated), (7, 4096));
     }
 
@@ -1403,7 +1428,7 @@ mod tests {
             links: 1,
             ..Parts::default()
         });
-        let entry = linked.finish().unwrap();
+        let entry = linked.finish(4096).unwrap();
         assert!(entry.flags & IS_HARDLINK != 0);
         // The first name found keeps the file; it is counted once.
         assert_eq!(entry.name, "one.dll");
@@ -1418,7 +1443,7 @@ mod tests {
             links: 1,
             ..Parts::default()
         });
-        let entry = aliased.finish().unwrap();
+        let entry = aliased.finish(4096).unwrap();
         assert_eq!(entry.flags & IS_HARDLINK, 0);
         assert_eq!(entry.name, "Program Files");
     }
@@ -1428,16 +1453,17 @@ mod tests {
         let parts = Parts {
             name: Some(name(ROOT_RECORD as u64, "a.txt", 1)),
             links: 1,
-            data: Some((100, 4096)),
-            other_on_disk: 8192,
+            data_size: Some(100),
+            // One data cluster, two of an alternate stream.
+            clusters: 3,
             ..Parts::default()
         };
-        let entry = parts.finish().unwrap();
+        let entry = parts.finish(4096).unwrap();
         assert_eq!((entry.size, entry.allocated), (100, 12288));
     }
 
     #[test]
     fn a_record_with_no_name_is_not_an_entry() {
-        assert!(Parts::default().finish().is_none());
+        assert!(Parts::default().finish(4096).is_none());
     }
 }

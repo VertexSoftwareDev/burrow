@@ -24,63 +24,98 @@ pub struct Run {
 /// does not fit — a malformed tail yields the runs decoded so far rather than
 /// an error, which keeps one damaged attribute from aborting a whole scan.
 pub fn parse_runs(buf: &[u8]) -> Vec<Run> {
-    let mut runs = Vec::new();
-    let mut pos = 0usize;
-    let mut previous_lcn: i64 = 0;
+    RunIter::new(buf).collect()
+}
 
-    while pos < buf.len() {
-        let header = buf[pos];
-        if header == 0 {
-            break; // end of the run list
+/// Clusters that actually hold data: every run except the holes.
+///
+/// This is the one measure of occupied space that is right for every kind
+/// of attribute. A compressed file's run list leaves holes where compression
+/// saved space, a sparse file's leaves holes where nothing was written, and
+/// NTFS's own `$BadClus` describes the whole volume as one giant hole — its
+/// allocated size is the disk's size, its footprint is nothing.
+pub fn stored_clusters(buf: &[u8]) -> u64 {
+    RunIter::new(buf)
+        .filter(|run| run.lcn.is_some())
+        .map(|run| run.clusters)
+        .sum()
+}
+
+/// Total cluster count covered by a run list, holes included.
+pub fn total_clusters(runs: &[Run]) -> u64 {
+    runs.iter().map(|r| r.clusters).sum()
+}
+
+/// Decodes a run list one extent at a time, without allocating.
+pub struct RunIter<'a> {
+    buf: &'a [u8],
+    pos: usize,
+    previous_lcn: i64,
+}
+
+impl<'a> RunIter<'a> {
+    pub fn new(buf: &'a [u8]) -> RunIter<'a> {
+        RunIter {
+            buf,
+            pos: 0,
+            previous_lcn: 0,
         }
-        pos += 1;
+    }
+}
+
+impl Iterator for RunIter<'_> {
+    type Item = Run;
+
+    fn next(&mut self) -> Option<Run> {
+        let buf = self.buf;
+        let header = *buf.get(self.pos)?;
+        if header == 0 {
+            return None; // end of the run list
+        }
+        self.pos += 1;
 
         let len_size = (header & 0x0F) as usize;
         let off_size = (header >> 4) as usize;
 
         // Both fields are at most 8 bytes; a larger nibble means corruption.
         if len_size == 0 || len_size > 8 || off_size > 8 {
-            break;
+            self.pos = buf.len();
+            return None;
         }
-        if pos + len_size + off_size > buf.len() {
-            break;
+        if self.pos + len_size + off_size > buf.len() {
+            self.pos = buf.len();
+            return None;
         }
 
-        let clusters = read_unsigned(&buf[pos..pos + len_size]);
-        pos += len_size;
+        let clusters = read_unsigned(&buf[self.pos..self.pos + len_size]);
+        self.pos += len_size;
 
         if off_size == 0 {
             // No offset field: a sparse run, i.e. a hole with no storage.
-            runs.push(Run {
+            return Some(Run {
                 lcn: None,
                 clusters,
             });
-            continue;
         }
 
         // The offset is signed and relative to the previous run's start, so
         // runs can point backwards on a fragmented volume.
-        let delta = read_signed(&buf[pos..pos + off_size]);
-        pos += off_size;
+        let delta = read_signed(&buf[self.pos..self.pos + off_size]);
+        self.pos += off_size;
 
-        let lcn = previous_lcn.wrapping_add(delta);
-        previous_lcn = lcn;
+        let lcn = self.previous_lcn.wrapping_add(delta);
+        self.previous_lcn = lcn;
 
         if lcn < 0 {
-            break; // would point outside the volume
+            // Would point outside the volume.
+            self.pos = buf.len();
+            return None;
         }
-        runs.push(Run {
+        Some(Run {
             lcn: Some(lcn as u64),
             clusters,
-        });
+        })
     }
-
-    runs
-}
-
-/// Total cluster count covered by a run list, holes included.
-pub fn total_clusters(runs: &[Run]) -> u64 {
-    runs.iter().map(|r| r.clusters).sum()
 }
 
 fn read_unsigned(bytes: &[u8]) -> u64 {
@@ -183,5 +218,14 @@ mod tests {
             },
         ];
         assert_eq!(total_clusters(&runs), 7);
+    }
+
+    #[test]
+    fn stored_clusters_skip_the_holes() {
+        // 0x10 real clusters, a 0x7F-cluster hole, 0x08 more real ones.
+        let buf = [0x11, 0x10, 0x60, 0x01, 0x7F, 0x11, 0x08, 0x10, 0x00];
+        assert_eq!(stored_clusters(&buf), 0x18);
+        // A volume-sized hole, like $BadClus's $Bad stream, stores nothing.
+        assert_eq!(stored_clusters(&[0x04, 0x00, 0x00, 0x00, 0x08, 0x00]), 0);
     }
 }
