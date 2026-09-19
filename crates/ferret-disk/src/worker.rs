@@ -14,6 +14,8 @@ use ferret_core::{Index, ScanOptions};
 use ferret_tree::Tree;
 
 use crate::shell::{self, Drive};
+use crate::watch::{self, WatchEvent};
+use ferret_core::journal::{self, Cursor};
 
 /// One scanned volume. Shared with the window behind a lock, so the worker
 /// can later update it in place as the disk changes.
@@ -26,6 +28,10 @@ pub struct Scan {
     pub seconds: f64,
     /// Bumped whenever the tree changes, so cached layouts know to redo.
     pub generation: u64,
+    /// Whether the change journal is being followed.
+    pub live: bool,
+    /// Changes folded in since the scan.
+    pub changes: u64,
 }
 
 impl Scan {
@@ -53,6 +59,10 @@ pub enum Event {
     },
     Scanned(char, Result<SharedScan, String>),
     Elevation(bool),
+    /// The disk changed and the scan was updated in place.
+    Changed,
+    /// The change journal can no longer be followed; a rescan is needed.
+    Stale,
     Failed(String),
     /// An elevated copy is starting; this one should close.
     Restarting,
@@ -118,7 +128,16 @@ fn run(requests: Receiver<Request>, sink: Sink) {
             Request::Drives => sink.send(Event::Drives(shell::drives())),
             Request::Scan(letter) => {
                 let result = scan(letter, &sink);
-                sink.send(Event::Scanned(letter, result));
+                if let Ok((shared, Some(cursor))) = &result {
+                    let watch_sink = sink.clone();
+                    watch::spawn(Arc::downgrade(shared), letter, *cursor, move |event| {
+                        watch_sink.send(match event {
+                            WatchEvent::Updated => Event::Changed,
+                            WatchEvent::Stale => Event::Stale,
+                        })
+                    });
+                }
+                sink.send(Event::Scanned(letter, result.map(|(shared, _)| shared)));
             }
             Request::Open(path) => {
                 if let Err(err) = shell::open(&path) {
@@ -146,8 +165,14 @@ fn run(requests: Receiver<Request>, sink: Sink) {
 /// more often than a bar can show.
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
-fn scan(letter: char, sink: &Sink) -> Result<SharedScan, String> {
+fn scan(letter: char, sink: &Sink) -> Result<(SharedScan, Option<Cursor>), String> {
     let started = Instant::now();
+    // Where the change journal stands *before* the table is read, so nothing
+    // that happens during the scan is missed. No journal just means no live
+    // updates.
+    let cursor = ferret_core::Volume::open(letter)
+        .ok()
+        .and_then(|volume| journal::cursor_at_end(&volume).ok());
     let mut last = Instant::now() - PROGRESS_EVERY;
     // Metafiles included: `$MFT` alone is gigabytes on a big disk, and a
     // disk-usage view that hid it would leave that space unexplained.
@@ -180,12 +205,15 @@ fn scan(letter: char, sink: &Sink) -> Result<SharedScan, String> {
         free: 0,
     });
 
-    Ok(Arc::new(RwLock::new(Scan {
+    let shared = Arc::new(RwLock::new(Scan {
         letter,
         index,
         tree,
         drive,
         seconds: started.elapsed().as_secs_f64(),
         generation: 1,
-    })))
+        live: cursor.is_some(),
+        changes: 0,
+    }));
+    Ok((shared, cursor))
 }

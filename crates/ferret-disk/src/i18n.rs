@@ -79,6 +79,9 @@ pub struct Strings {
     pub no_volume_detail: &'static str,
     pub not_ntfs: &'static str,
     pub copied: &'static str,
+    pub live_tooltip: &'static str,
+    pub not_live: &'static str,
+    pub stale: &'static str,
 }
 
 const TR: Strings = Strings {
@@ -139,6 +142,9 @@ const TR: Strings = Strings {
     no_volume_detail: "Ferret Disk şimdilik yalnızca NTFS birimlerini okuyabiliyor.",
     not_ntfs: "NTFS değil",
     copied: "Yol kopyalandı.",
+    live_tooltip: "Disk izleniyor: dosyalar eklendikçe, silindikçe ve büyüdükçe harita kendini günceller. Yeniden taramaya gerek yok.",
+    not_live: "anlık görüntü",
+    stale: "Disk, izlenemeyecek kadar çok değişti. Güncel görmek için F5 ile yeniden tarayın.",
 };
 
 const EN: Strings = Strings {
@@ -199,6 +205,9 @@ const EN: Strings = Strings {
     no_volume_detail: "Ferret Disk can only read NTFS volumes for now.",
     not_ntfs: "not NTFS",
     copied: "Path copied.",
+    live_tooltip: "Watching the disk: the map updates itself as files are added, deleted and grow. No rescan needed.",
+    not_live: "snapshot",
+    stale: "The disk changed too much to follow. Press F5 to rescan.",
 };
 
 impl Lang {
@@ -259,6 +268,17 @@ impl Lang {
         match self {
             Lang::Tr => format!("{count} küçük öğe"),
             Lang::En => format!("{count} small items"),
+        }
+    }
+
+    /// The live badge: canlı · 12 değişiklik.
+    pub fn live(self, changes: u64) -> String {
+        let count = self.number(changes);
+        match (self, changes) {
+            (Lang::Tr, 0) => "canlı".into(),
+            (Lang::En, 0) => "live".into(),
+            (Lang::Tr, _) => format!("canlı · {count} değişiklik"),
+            (Lang::En, _) => format!("live · {count} changes"),
         }
     }
 

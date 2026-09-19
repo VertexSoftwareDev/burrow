@@ -74,6 +74,8 @@ pub struct DiskApp {
     scroll_to_row: bool,
 
     focus: NodeId,
+    /// The tree's root id, which moves when live changes add entries.
+    root: NodeId,
     layout: Option<Layout>,
     hovered: Option<NodeId>,
     /// What the map's context menu is about.
@@ -127,6 +129,7 @@ impl DiskApp {
             selected: None,
             scroll_to_row: false,
             focus: 0,
+            root: 0,
             layout: None,
             hovered: None,
             menu_node: None,
@@ -199,6 +202,39 @@ impl DiskApp {
         self.toast = Some((message, Instant::now()));
     }
 
+    /// The watcher rebuilt the tree. Everything keyed by generation redraws
+    /// by itself; what needs care is the root, whose id is one past the last
+    /// entry and so moves when new files are indexed, and a selection whose
+    /// file has since been deleted.
+    fn after_change(&mut self) {
+        let Some(shared) = self.scan.clone() else {
+            return;
+        };
+        let Ok(scan) = shared.read() else { return };
+        let tree = &scan.tree;
+        let root = tree.root();
+        if root != self.root {
+            let old = self.root;
+            if self.expanded.remove(&old) {
+                self.expanded.insert(root);
+            }
+            if self.focus == old {
+                self.focus = root;
+            }
+            if self.selected == Some(old) {
+                self.selected = Some(root);
+            }
+            self.root = root;
+        }
+        if self.selected.is_some_and(|s| !tree.contains(s)) {
+            self.selected = None;
+        }
+        if !tree.contains(self.focus) || !tree.is_dir(self.focus) {
+            self.focus = root;
+        }
+        self.menu_node = None;
+    }
+
     fn absorb(&mut self, events: Vec<Event>) {
         for event in events {
             match event {
@@ -241,6 +277,7 @@ impl DiskApp {
                     self.rows_for = None;
                     self.selected = None;
                     self.focus = root;
+                    self.root = root;
                     self.layout = None;
                     self.largest = None;
                     self.kinds = None;
@@ -252,6 +289,11 @@ impl DiskApp {
                     } else {
                         Phase::Failed { letter, message }
                     };
+                }
+                Event::Changed => self.after_change(),
+                Event::Stale => {
+                    let text = self.lang.strings().stale.to_string();
+                    self.inform(text);
                 }
                 Event::Failed(message) => {
                     let text = self.lang.error(&message);
@@ -620,6 +662,24 @@ impl DiskApp {
                             .small()
                             .color(palette.muted),
                         );
+                        let strings = lang.strings();
+                        if scan.live {
+                            ui.label(egui::RichText::new("●").small().color(palette.accent))
+                                .on_hover_text(strings.live_tooltip);
+                            ui.label(
+                                egui::RichText::new(lang.live(scan.changes))
+                                    .small()
+                                    .color(palette.muted),
+                            )
+                            .on_hover_text(strings.live_tooltip);
+                        } else {
+                            ui.label(
+                                egui::RichText::new(strings.not_live)
+                                    .small()
+                                    .color(palette.muted),
+                            )
+                            .on_hover_text(strings.stale);
+                        }
                     }
                     if let Some((message, _)) = &self.toast {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1114,7 +1174,7 @@ impl DiskApp {
                 ui.add_space(4.0);
 
                 // Leave room for the legend under the map.
-                let size = ui.available_size() - egui::vec2(0.0, 48.0);
+                let size = ui.available_size() - egui::vec2(0.0, 58.0);
                 let (rect, response) =
                     ui.allocate_exact_size(size.max(egui::vec2(10.0, 10.0)), egui::Sense::click());
 

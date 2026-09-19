@@ -128,6 +128,49 @@ pub fn restart_elevated() -> Result<(), String> {
         .map_err(|e| format!("restart_failed:{e}"))
 }
 
+/// A file's current sizes and modification time, read through the normal
+/// filesystem — which, unlike the raw volume, sees what was written a moment
+/// ago. `None` when the file is already gone again, which is common: the
+/// journal reports work that finished before anyone looked.
+pub fn stat(path: &str) -> Option<ferret_core::FileStat> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, FileStandardInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_STANDARD_INFO,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    let handle = file.as_raw_handle() as _;
+
+    let mut standard: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileStandardInfo,
+            &mut standard as *mut _ as *mut _,
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        ) != 0
+            && GetFileInformationByHandleEx(
+                handle,
+                FileBasicInfo,
+                &mut basic as *mut _ as *mut _,
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            ) != 0
+    };
+    ok.then(|| ferret_core::FileStat {
+        size: standard.EndOfFile.max(0) as u64,
+        allocated: standard.AllocationSize.max(0) as u64,
+        modified: basic.LastWriteTime.max(0) as u64,
+    })
+}
+
 /// Open a file or folder with its default handler.
 pub fn open(path: &str) -> Result<(), String> {
     Command::new("explorer")

@@ -12,9 +12,11 @@ mod format;
 mod i18n;
 mod prefs;
 mod rows;
+mod selftest;
 mod shell;
 mod theme;
 mod treemap;
+mod watch;
 mod worker;
 
 use eframe::egui;
@@ -27,6 +29,13 @@ fn main() -> eframe::Result {
     // documentation, and for checking the window on a machine where it runs
     // elevated and cannot be driven from outside.
     let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--selftest-live") {
+        let report = args
+            .get(i + 1)
+            .map(String::as_str)
+            .unwrap_or("selftest.txt");
+        std::process::exit(selftest::run(std::path::Path::new(report)));
+    }
     let screenshot = args
         .iter()
         .position(|a| a == "--screenshot")
