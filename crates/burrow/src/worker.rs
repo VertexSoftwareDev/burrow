@@ -60,9 +60,12 @@ pub enum Request {
     },
     /// Run the cleanup rules over a scan.
     Suggest(SharedScan),
-    /// Move paths to the recycle bin; ytes is what they hold.
+    /// Move items to the recycle bin; `bytes` is what they hold. Each is
+    /// checked against the safety policy once more, on the scan as it is at
+    /// that moment, before anything moves.
     Recycle {
-        paths: Vec<String>,
+        scan: SharedScan,
+        items: Vec<Removal>,
         bytes: u64,
     },
     OpenRecycleBin,
@@ -100,11 +103,13 @@ pub enum Event {
         generation: u64,
         list: Vec<cleanup::Suggestion>,
     },
-    /// What a recycle achieved. ytes is what was asked to go: the space
-    /// only comes back when the recycle bin is emptied.
+    /// What a recycle achieved. `bytes` is what was asked to go: the space
+    /// only comes back when the recycle bin is emptied. `refused` counts
+    /// items the last safety check turned away.
     Recycled {
         result: shell::Recycled,
         bytes: u64,
+        refused: usize,
     },
     DupesFound {
         groups: Vec<dupes::Group>,
@@ -227,15 +232,26 @@ fn run(requests: Receiver<Request>, sink: Sink) {
             Request::Suggest(scan) => {
                 let found = scan.read().ok().map(|s| {
                     let now = now_filetime();
-                    (s.generation, cleanup::suggest(&s.index, &s.tree, now))
+                    let profile = shell::profile_name();
+                    (
+                        s.generation,
+                        cleanup::suggest(&s.index, &s.tree, now, &profile),
+                    )
                 });
                 if let Some((generation, list)) = found {
                     sink.send(Event::Suggestions { generation, list });
                 }
             }
-            Request::Recycle { paths, bytes } => {
+            Request::Recycle { scan, items, bytes } => {
+                let asked = items.len();
+                let paths = cleared_for_removal(&scan, items);
+                let refused = asked - paths.len();
                 let result = shell::recycle(&paths);
-                sink.send(Event::Recycled { result, bytes });
+                sink.send(Event::Recycled {
+                    result,
+                    bytes,
+                    refused,
+                });
             }
             Request::ListSnapshots(letter) => sink.send(Event::Snapshots(snapshots::list(letter))),
             Request::Compare { scan, saved } => {
@@ -336,7 +352,7 @@ fn find_duplicates(scan: &SharedScan, min_size: u64, cancel: &AtomicBool, sink: 
     // The list of candidates needs the index; the reading does not, so the
     // lock is held only for the first.
     let candidates = match scan.read() {
-        Ok(scan) => dupes::candidates(&scan.index, &scan.tree, min_size),
+        Ok(scan) => dupes::candidates(&scan.index, &scan.tree, min_size, &shell::profile_name()),
         Err(_) => return,
     };
     let last = std::sync::Mutex::new(Instant::now() - PROGRESS_EVERY);
@@ -368,4 +384,32 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// One thing to move to the recycle bin.
+#[derive(Debug, Clone)]
+pub struct Removal {
+    pub path: String,
+    /// Named by a reviewed cleanup path, which may reach into application
+    /// data and Windows' temp folders; everything else may not.
+    pub trusted: bool,
+}
+
+/// The last gate. Every path is found again in the scan as it is now and
+/// put to the safety policy; whatever cannot be found, or is refused, stays
+/// where it is. Nothing the window got wrong can get past this.
+fn cleared_for_removal(scan: &SharedScan, items: Vec<Removal>) -> Vec<String> {
+    let Ok(scan) = scan.read() else {
+        return Vec::new();
+    };
+    let profile = shell::profile_name();
+    let policy = burrow_tree::safety::Policy::new(&scan.index, &scan.tree, &profile);
+    items
+        .into_iter()
+        .filter(|item| {
+            snapshot::find(&scan.index, &scan.tree, &item.path)
+                .is_some_and(|node| policy.may_remove(node, item.trusted))
+        })
+        .map(|item| item.path)
+        .collect()
 }

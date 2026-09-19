@@ -24,6 +24,7 @@ use std::collections::HashSet;
 
 use ferret_core::Index;
 
+use crate::safety::Policy;
 use crate::{Kind, NodeId, Tree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -97,7 +98,7 @@ pub static RULES: &[Rule] = &[
     },
     Rule {
         id: "update_cache",
-        safety: Safety::Safe,
+        safety: Safety::Likely,
         mode: Mode::Contents,
         matcher: Matcher::Paths(&[&["windows", "softwaredistribution", "download"]]),
     },
@@ -271,10 +272,28 @@ pub struct Suggestion {
 /// FILETIME ticks per day.
 const DAY: u64 = 864_000_000_000;
 
-/// Run every rule over the tree. `now` is a FILETIME. A place matched by an
-/// earlier (safer) rule is not offered again by a later one, so the totals
-/// can be added up.
-pub fn suggest(index: &Index, tree: &Tree, now: u64) -> Vec<Suggestion> {
+impl Rule {
+    /// Whether the rule names exact, reviewed paths. Only such rules may
+    /// reach into places the [`Policy`] refuses by hand — Windows' temp
+    /// folder, a browser's cache in AppData. Rules that match by name or by
+    /// age could match anything, so they get no such trust.
+    pub fn is_trusted(&self) -> bool {
+        matches!(self.matcher, Matcher::Paths(_))
+    }
+
+    /// Whether this rule may offer `node`. An explanation removes nothing,
+    /// so it may point anywhere.
+    pub fn may_remove(&self, policy: &Policy, node: NodeId) -> bool {
+        self.mode == Mode::Info || policy.may_remove(node, self.is_trusted())
+    }
+}
+
+/// Run every rule over the tree. `now` is a FILETIME; `profile` is the
+/// signed-in person's profile folder name. A place matched by an earlier
+/// (safer) rule is not offered again by a later one, so the totals can be
+/// added up.
+pub fn suggest(index: &Index, tree: &Tree, now: u64, profile: &str) -> Vec<Suggestion> {
+    let policy = Policy::new(index, tree, profile);
     let mut covered: HashSet<NodeId> = HashSet::new();
     let mut out = Vec::new();
 
@@ -307,7 +326,7 @@ pub fn suggest(index: &Index, tree: &Tree, now: u64) -> Vec<Suggestion> {
         let mut targets: Vec<NodeId> = Vec::new();
         for node in found {
             let chain = tree.ancestry(node);
-            if chain.iter().any(|n| covered.contains(n)) {
+            if chain.iter().any(|n| covered.contains(n)) || !rule.may_remove(&policy, node) {
                 continue;
             }
             targets.push(node);
@@ -436,49 +455,16 @@ fn stale(
                 && totals.allocated >= min_size
                 && totals.newest != 0
                 && totals.newest < before
-                && !matches!(Kind::of(name), Kind::System)
+                && !matches!(
+                    Kind::of(name),
+                    Kind::System | Kind::DiskImage | Kind::Database
+                )
             {
                 out.push(child);
             }
         }
     }
     out
-}
-
-/// Places a person should never delete from by hand, even into the recycle
-/// bin: the operating system, installed programs, and the volume's own
-/// bookkeeping. The cleanup rules reach into a few of these on purpose
-/// (Windows' temp folder, its update cache); a click on the map does not.
-pub fn is_protected(index: &Index, tree: &Tree, node: NodeId) -> bool {
-    if node == tree.root() {
-        return true;
-    }
-    let chain = tree.ancestry(node);
-    let Some(&top) = chain.get(1) else {
-        return true;
-    };
-    let top_name = index.name(top as usize).to_ascii_lowercase();
-    if top_name.starts_with('$')
-        || top_name == "system volume information"
-        || top_name == "recovery"
-    {
-        return true;
-    }
-    // Loose files in the root: pagefile.sys, hiberfil.sys, bootmgr, ...
-    if chain.len() == 2 && !tree.is_dir(node) {
-        return true;
-    }
-    if matches!(
-        top_name.as_str(),
-        "windows" | "program files" | "program files (x86)" | "programdata" | "boot" | "efi"
-    ) {
-        return true;
-    }
-    // A user's profile folder itself, and `Users` — but not what is in them.
-    if top_name == "users" && chain.len() <= 3 {
-        return true;
-    }
-    false
 }
 
 #[cfg(test)]
@@ -543,7 +529,7 @@ mod tests {
     #[test]
     fn temp_is_emptied_not_removed() {
         let (index, tree) = sample();
-        let s = suggest(&index, &tree, NOW);
+        let s = suggest(&index, &tree, NOW, "pc");
         let temp = found(&s, "user_temp").expect("temp found");
         assert_eq!(names(&index, temp), ["Temp"]);
         assert_eq!(temp.rule.mode, Mode::Contents);
@@ -554,7 +540,7 @@ mod tests {
     #[test]
     fn only_the_outermost_node_modules_is_offered() {
         let (index, tree) = sample();
-        let s = suggest(&index, &tree, NOW);
+        let s = suggest(&index, &tree, NOW, "pc");
         let nm = found(&s, "node_modules").unwrap();
         assert_eq!(nm.targets.len(), 1);
         assert_eq!(tree.totals(nm.targets[0]).files, 1);
@@ -563,7 +549,7 @@ mod tests {
     #[test]
     fn target_needs_a_cargo_toml_beside_it() {
         let (index, tree) = sample();
-        let s = suggest(&index, &tree, NOW);
+        let s = suggest(&index, &tree, NOW, "pc");
         let build = found(&s, "build_output").unwrap();
         assert_eq!(build.targets.len(), 1);
         assert_eq!(
@@ -575,7 +561,7 @@ mod tests {
     #[test]
     fn stale_rules_look_at_age_size_and_extension() {
         let (index, tree) = sample();
-        let s = suggest(&index, &tree, NOW);
+        let s = suggest(&index, &tree, NOW, "pc");
         assert_eq!(
             names(&index, found(&s, "old_installers").unwrap()),
             ["setup.exe"]
@@ -590,7 +576,7 @@ mod tests {
     #[test]
     fn hibernation_is_explained_not_deleted() {
         let (index, tree) = sample();
-        let s = suggest(&index, &tree, NOW);
+        let s = suggest(&index, &tree, NOW, "pc");
         let h = found(&s, "hibernation").unwrap();
         assert_eq!(h.rule.mode, Mode::Info);
         assert_eq!(h.bytes, 6 << 30);
@@ -599,27 +585,9 @@ mod tests {
     #[test]
     fn rules_that_find_nothing_are_left_out() {
         let (index, tree) = sample();
-        let s = suggest(&index, &tree, NOW);
+        let s = suggest(&index, &tree, NOW, "pc");
         assert!(found(&s, "windows_old").is_none());
         assert!(found(&s, "browser_cache").is_none());
-    }
-
-    #[test]
-    fn system_places_are_protected_but_a_users_files_are_not() {
-        let (index, tree) = sample();
-        let by_name = |name: &str| {
-            (0..tree.root())
-                .find(|n| index.name(*n as usize) == name)
-                .unwrap()
-        };
-        assert!(is_protected(&index, &tree, tree.root()));
-        assert!(is_protected(&index, &tree, by_name("Windows")));
-        assert!(is_protected(&index, &tree, by_name("notepad.exe")));
-        assert!(is_protected(&index, &tree, by_name("hiberfil.sys")));
-        assert!(is_protected(&index, &tree, by_name("Users")));
-        assert!(is_protected(&index, &tree, by_name("pc")));
-        assert!(!is_protected(&index, &tree, by_name("setup.exe")));
-        assert!(!is_protected(&index, &tree, by_name("projects")));
     }
 
     #[test]

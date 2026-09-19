@@ -40,10 +40,12 @@ fn main() -> ExitCode {
         "report" => report(letter, number("--top", 20)),
         "verify" => verify(letter, number("--sample", 3000)),
         "dupes" => dupes(letter, number("--min", 1 << 20) as u64, number("--top", 20)),
+        "safety" => safety(letter, &args[2.min(args.len())..]),
         _ => {
             eprintln!("usage: burrow-cli report <drive> [--top N]");
             eprintln!("       burrow-cli verify <drive> [--sample N]");
             eprintln!("       burrow-cli dupes <drive> [--min BYTES] [--top N]");
+            eprintln!("       burrow-cli safety <drive> [PATH...]");
             return ExitCode::from(2);
         }
     };
@@ -355,7 +357,9 @@ fn dupes(letter: char, min_size: u64, top: usize) -> Result<ExitCode, String> {
 
     let Scanned { index, tree } = scan(letter)?;
     let started = Instant::now();
-    let candidates = dupes::candidates(&index, &tree, min_size);
+    // The same rule as the window: only files the person could remove.
+    let profile = profile_name();
+    let candidates = dupes::candidates(&index, &tree, min_size, &profile);
     let count = candidates.len();
     let last = std::sync::Mutex::new(Instant::now());
     let groups = dupes::find(candidates, &dupes::Disk, &AtomicBool::new(false), &|p| {
@@ -387,6 +391,59 @@ fn dupes(letter: char, min_size: u64, top: usize) -> Result<ExitCode, String> {
         );
         for file in &group.files {
             println!("     {}", file.path);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn profile_name() -> String {
+    std::env::var("USERPROFILE")
+        .ok()
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default()
+}
+
+/// What the safety policy says about given paths, and every folder the
+/// cleanup rules would touch — to check the rules against a real disk.
+fn safety(letter: char, paths: &[String]) -> Result<ExitCode, String> {
+    use burrow_tree::{cleanup, safety::Policy, snapshot};
+
+    let Scanned { index, tree } = scan(letter)?;
+    let profile = profile_name();
+    let policy = Policy::new(&index, &tree, &profile);
+    println!("\nprofile: {profile}\n");
+    for path in paths {
+        let verdict = match snapshot::find(&index, &tree, path) {
+            None => "not found".to_string(),
+            Some(node) => match policy.check(node) {
+                Ok(()) => "ALLOWED".to_string(),
+                Err(block) => format!("refused: {block:?}"),
+            },
+        };
+        println!("  {verdict:<22} {path}");
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() + 11_644_473_600) * 10_000_000)
+        .unwrap_or(0);
+    println!("\nCleanup suggestions:");
+    for s in cleanup::suggest(&index, &tree, now, &profile) {
+        println!(
+            "\n  {} ({:?}, {:?}, trusted {}) {} in {} places",
+            s.rule.id,
+            s.rule.safety,
+            s.rule.mode,
+            s.rule.is_trusted(),
+            human_size(s.bytes),
+            s.targets.len()
+        );
+        for &t in s.targets.iter().take(8) {
+            println!("     {}", tree.path(&index, t));
         }
     }
     Ok(ExitCode::SUCCESS)

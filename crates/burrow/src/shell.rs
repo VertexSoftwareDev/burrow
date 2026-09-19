@@ -95,6 +95,23 @@ pub fn system_drive() -> char {
         .unwrap_or('C')
 }
 
+/// The signed-in person's profile folder name, e.g. `pc` for `C:\Users\pc`.
+///
+/// Taken from `USERPROFILE`, which an elevated copy of Burrow still gets
+/// from the person who started it. Without it, the name is left empty — and
+/// an empty name matches no profile, so nothing in any profile can be
+/// removed. Failing closed is the point.
+pub fn profile_name() -> String {
+    std::env::var("USERPROFILE")
+        .ok()
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default()
+}
+
 /// The user's locale as a BCP-47 tag, e.g. `tr-TR`.
 pub fn user_locale() -> Option<String> {
     let mut buffer = [0u16; 85];

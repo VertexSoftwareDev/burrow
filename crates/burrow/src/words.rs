@@ -3,6 +3,7 @@
 //! text because it is most of it.
 
 use burrow_tree::cleanup::Safety;
+use burrow_tree::safety::Block;
 
 use crate::i18n::Lang;
 
@@ -15,18 +16,17 @@ pub struct Words {
     pub recycle_selected: &'static str,
 
     pub menu_recycle: &'static str,
-    pub protected: &'static str,
 
     pub confirm_title: &'static str,
     pub confirm_detail: &'static str,
     pub confirm_action: &'static str,
     pub cancel: &'static str,
     pub recycling: &'static str,
+    pub nuke_warning: &'static str,
+    pub acknowledge: &'static str,
 
     pub keep_one: &'static str,
     pub keep_one_tooltip: &'static str,
-    pub app_folder: &'static str,
-    pub app_folder_note: &'static str,
     pub clear_selection: &'static str,
 
     pub open_recycle_bin: &'static str,
@@ -56,7 +56,6 @@ const TR: Words = Words {
     recycle_selected: "Seçilenleri Geri Dönüşüm Kutusu'na taşı",
 
     menu_recycle: "Geri Dönüşüm Kutusu'na taşı",
-    protected: "Windows'un veya kurulu programların parçası; buradan silinmez.",
 
     confirm_title: "Geri Dönüşüm Kutusu'na taşınsın mı?",
     confirm_detail: concat!(
@@ -67,11 +66,11 @@ const TR: Words = Words {
     confirm_action: "Taşı",
     cancel: "Vazgeç",
     recycling: "Taşınıyor…",
+    nuke_warning: "Windows 'kalıcı olarak silinsin mi?' diye sorarsa, emin değilseniz Hayır'ı seçin: o dosya Geri Dönüşüm Kutusu'na sığmıyor ve geri getirilemez.",
+    acknowledge: "Neyin silineceğini kontrol ettim ve bunların gidebileceğini biliyorum",
 
     keep_one: "Her grupta birini bırak, gerisini seç",
-    keep_one_tooltip: "Yalnızca bütün kopyaları sizin klasörlerinizde (İndirilenler, Belgeler, Masaüstü…) olan gruplar işaretlenir. Bir uygulamanın klasöründeki kopyalar elle seçilmeli: uygulama dosyayı tam o yoldan kullanıyor olabilir.",
-    app_folder: "uygulama klasörü",
-    app_folder_note: "Bu kopya bir uygulamanın kendi klasöründe (AppData, .minecraft, .gradle…). İçerik aynı olsa da uygulama dosyayı bu yoldan kullanıyor olabilir; silinirse o uygulama bozulabilir.",
+    keep_one_tooltip: "Her gruptan en kısa yoldaki kopya kalır, diğerleri işaretlenir. Yalnızca sizin kendi dosyalarınız listelenir; programların, Windows'un ve uygulama verilerinin (AppData, .minecraft…) kopyaları hiç gösterilmez. Bir grubun son kopyası asla silinmez.",
     clear_selection: "Seçimi temizle",
 
     open_recycle_bin: "Geri Dönüşüm Kutusu'nu aç",
@@ -104,7 +103,6 @@ const EN: Words = Words {
     recycle_selected: "Move selected to the Recycle Bin",
 
     menu_recycle: "Move to the Recycle Bin",
-    protected: "Part of Windows or an installed program; not deleted from here.",
 
     confirm_title: "Move to the Recycle Bin?",
     confirm_detail: concat!(
@@ -115,11 +113,11 @@ const EN: Words = Words {
     confirm_action: "Move",
     cancel: "Cancel",
     recycling: "Moving…",
+    nuke_warning: "If Windows asks whether to delete something permanently, choose No unless you are sure: that file does not fit in the Recycle Bin and cannot be brought back.",
+    acknowledge: "I have checked what will be removed and know it can go",
 
     keep_one: "Keep one in each group, select the rest",
-    keep_one_tooltip: "Only groups whose every copy is in your own folders (Downloads, Documents, Desktop…) are ticked. Copies in an application's folder are for you to pick by hand: the application may use the file from that exact path.",
-    app_folder: "app folder",
-    app_folder_note: "This copy is in an application's own folder (AppData, .minecraft, .gradle…). Even with the same contents, the application may use the file from this path; removing it can break that application.",
+    keep_one_tooltip: "The copy with the shortest path stays, the others are ticked. Only your own files are listed; copies belonging to programs, Windows or application data (AppData, .minecraft…) are never shown. The last copy of a group is never removed.",
     clear_selection: "Clear selection",
 
     open_recycle_bin: "Open the Recycle Bin",
@@ -225,6 +223,38 @@ impl Lang {
             ),
             (Lang::En, "windows_old") => ("Previous Windows installation", "Windows.old is best removed with Disk Cleanup."),
             _ => ("?", ""),
+        }
+    }
+
+    /// Why something cannot be moved to the Recycle Bin, in plain words.
+    pub fn block(self, block: Block) -> &'static str {
+        match (self, block) {
+            (Lang::Tr, Block::Root) => "Sürücünün kökü ve kökteki dosyalar (pagefile.sys gibi) Windows'a aittir.",
+            (Lang::Tr, Block::System) => "Windows'un bir parçası. Silinirse bilgisayar açılmayabilir.",
+            (Lang::Tr, Block::Programs) => "Kurulu bir program. Programları Ayarlar > Uygulamalar'dan kaldırın.",
+            (Lang::Tr, Block::Profile) => "Windows'un kullanıcı hesabı için gerektirdiği bir klasör veya dosya. İçindekiler silinebilir, kendisi silinemez.",
+            (Lang::Tr, Block::OtherUser) => "Bu bilgisayardaki başka bir kullanıcının dosyası.",
+            (Lang::Tr, Block::AppData) => "Bir uygulamanın kendi verisi (AppData, .minecraft…). Uygulama bu dosyayı tam bu yoldan kullanıyor olabilir; silinirse bozulabilir.",
+            (Lang::Tr, Block::SystemFile) => "Windows'un sistem dosyası olarak işaretlediği bir dosya.",
+            (Lang::Tr, Block::Link) => "Başka bir yere giden bir bağlantı (junction/symlink); silmek göründüğünü yapmaz.",
+            (Lang::En, Block::Root) => "The drive's root and the files in it (like pagefile.sys) belong to Windows.",
+            (Lang::En, Block::System) => "Part of Windows. Removing it can stop the computer from starting.",
+            (Lang::En, Block::Programs) => "An installed program. Remove programs from Settings > Apps.",
+            (Lang::En, Block::Profile) => "A folder or file Windows needs for the user account. What is inside can go; it cannot.",
+            (Lang::En, Block::OtherUser) => "Another person's file on this computer.",
+            (Lang::En, Block::AppData) => "An application's own data (AppData, .minecraft…). The application may use it from exactly this path; removing it can break it.",
+            (Lang::En, Block::SystemFile) => "Marked by Windows as a system file.",
+            (Lang::En, Block::Link) => "A link to somewhere else (junction/symlink); removing it does not do what it looks like.",
+        }
+    }
+
+    /// Items the last safety check kept in place.
+    pub fn refused(self, count: usize) -> String {
+        match self {
+            Lang::Tr => {
+                format!("{count} öğe güvenlik denetiminden geçmediği için yerinde bırakıldı.")
+            }
+            Lang::En => format!("{count} items were left in place by the safety check."),
         }
     }
 

@@ -21,9 +21,9 @@
 //! duplicates of each other — the index holds one entry per file, not per
 //! name.
 //!
-//! What is never *looked at*: every place [`crate::cleanup::is_protected`]
-//! guards — Windows, installed programs, the Recycle Bin, System Volume
-//! Information. Identical contents there are not waste. Windows keeps
+//! What is never *looked at*: every place the [`crate::safety::Policy`]
+//! refuses — Windows, installed programs, the Recycle Bin, application data,
+//! other people's profiles. Identical contents there are not waste. Windows keeps
 //! `Sessions.xml` beside `Sessions.back.xml` on purpose, to recover from an
 //! update that fails halfway; a game ships the same asset in two packages
 //! because it loads them separately; the Recycle Bin holds copies of what
@@ -84,8 +84,9 @@ pub trait Source: Sync {
 }
 
 /// Every file in the tree worth comparing, largest first.
-pub fn candidates(index: &Index, tree: &Tree, min_size: u64) -> Vec<Candidate> {
+pub fn candidates(index: &Index, tree: &Tree, min_size: u64, profile: &str) -> Vec<Candidate> {
     let entries = index.entries();
+    let policy = crate::safety::Policy::new(index, tree, profile);
     let mut out: Vec<Candidate> = (0..tree.root())
         .filter(|node| tree.contains(*node) && !tree.is_dir(*node))
         .filter_map(|node| {
@@ -100,7 +101,7 @@ pub fn candidates(index: &Index, tree: &Tree, min_size: u64) -> Vec<Candidate> {
                 || index.name_of(entry).starts_with('$') && entry.parent == ferret_core::ROOT_RECORD;
             // Checked last: it walks the parent chain, and the size test
             // above has already ruled out almost every file.
-            if skip || crate::cleanup::is_protected(index, tree, node) {
+            if skip || !policy.allows(node) {
                 return None;
             }
             Some(Candidate {
@@ -112,28 +113,6 @@ pub fn candidates(index: &Index, tree: &Tree, min_size: u64) -> Vec<Candidate> {
         .collect();
     out.sort_by(|a, b| b.size.cmp(&a.size));
     out
-}
-
-/// Whether a path lies inside an application's own folder: `AppData`, or a
-/// dot-folder such as `.minecraft`, `.gradle` or `.lmstudio`.
-///
-/// Identical contents do not make such a copy redundant. The application
-/// reads it from that exact path — a launcher's `versions\1.21\1.21.jar`,
-/// an app's bundled tool, an editor's copy of a video it has imported — and
-/// removing it breaks the application even though the same bytes survive
-/// elsewhere. These copies are shown, but never ticked on anyone's behalf.
-pub fn owned_by_an_app(path: &str) -> bool {
-    path.split('\\').any(|part| {
-        part.eq_ignore_ascii_case("appdata") || (part.starts_with('.') && part.len() > 1)
-    })
-}
-
-/// Whether "keep one, remove the rest" may be applied to a group without
-/// asking: only when every copy sits in the person's own folders. A group
-/// with even one application-owned copy is theirs to decide file by file —
-/// removing the others could leave only the copy an app hides away.
-pub fn safe_to_thin(group: &Group) -> bool {
-    !group.files.iter().any(|f| owned_by_an_app(&f.path))
 }
 
 /// Run the three stages. Files that cannot be read (in use, protected,
@@ -413,55 +392,18 @@ mod tests {
         let index = index_from_specs(vec![
             dir(30, ROOT_RECORD, "Users"),
             dir(31, 30, "pc"),
-            file(20, 31, "keep.bin").sized(2 << 20),
-            file(21, 31, "tiny.txt").sized(10),
-            file(22, 31, "online.mp4")
+            dir(32, 31, "Documents"),
+            file(20, 32, "keep.bin").sized(2 << 20),
+            file(21, 32, "tiny.txt").sized(10),
+            file(22, 32, "online.mp4")
                 .sized(5 << 20)
                 .with_flags(IS_CLOUD),
             file(3, ROOT_RECORD, "$Volume").sized(1 << 20),
         ]);
         let tree = Tree::build(&index);
-        let found = candidates(&index, &tree, 1 << 20);
+        let found = candidates(&index, &tree, 1 << 20, "pc");
         let names: Vec<_> = found.iter().map(|c| index.name(c.node as usize)).collect();
         assert_eq!(names, ["keep.bin"]);
-    }
-
-    #[test]
-    fn copies_an_application_uses_are_not_thinned_automatically() {
-        let group = |paths: &[&str]| Group {
-            size: 1,
-            files: paths
-                .iter()
-                .enumerate()
-                .map(|(i, p)| Candidate {
-                    node: i as NodeId,
-                    path: p.to_string(),
-                    size: 1,
-                })
-                .collect(),
-        };
-        // A launcher loads each version's jar from its own folder.
-        assert!(!safe_to_thin(&group(&[
-            r"C:\Users\pc\AppData\Roaming\.minecraft\versions\Forge 1.21.11\Forge 1.21.11.jar",
-            r"C:\Users\pc\AppData\Roaming\.minecraft\versions\aa2\aa2.jar",
-        ])));
-        // A video in Downloads and the copy an editor imported into its own
-        // storage: removing the first would leave only the hidden one.
-        assert!(!safe_to_thin(&group(&[
-            r"C:\Users\pc\Downloads\SubVizion_V2.mp4",
-            r"C:\Users\pc\AppData\Local\Packages\Clipchamp\LocalState\00000014",
-        ])));
-        assert!(!safe_to_thin(&group(&[
-            r"C:\Users\pc\.lmstudio\bin\lms.exe",
-            r"C:\Users\pc\lms.exe"
-        ])));
-        // The same photo downloaded twice is exactly what the button is for.
-        assert!(safe_to_thin(&group(&[
-            r"C:\Users\pc\Downloads\IMG_2031.jpg",
-            r"C:\Users\pc\Pictures\Holiday\IMG_2031.jpg",
-        ])));
-        assert!(owned_by_an_app(r"C:\Users\pc\.gradle\caches\x.jar"));
-        assert!(!owned_by_an_app(r"C:\Users\pc\Documents\report.pdf"));
     }
 
     #[test]
@@ -483,10 +425,14 @@ mod tests {
             file(51, 50, "asset.pak").sized(30 << 20),
             dir(60, ROOT_RECORD, "Users"),
             dir(61, 60, "pc"),
-            file(62, 61, "client.jar").sized(30 << 20),
+            dir(63, 61, "Downloads"),
+            file(62, 63, "client.jar").sized(30 << 20),
+            // The launcher's own copy is application data, not a candidate.
+            dir(64, 61, ".minecraft"),
+            file(65, 64, "1.21.jar").sized(30 << 20),
         ]);
         let tree = Tree::build(&index);
-        let found = candidates(&index, &tree, 1 << 20);
+        let found = candidates(&index, &tree, 1 << 20, "pc");
         let names: Vec<_> = found.iter().map(|c| index.name(c.node as usize)).collect();
         assert_eq!(names, ["client.jar"]);
     }

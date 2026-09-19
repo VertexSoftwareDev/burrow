@@ -22,7 +22,7 @@ use crate::shell::{self, Drive};
 use crate::snapshots;
 use crate::theme::{self, Theme, ROW_HEIGHT};
 use crate::treemap::{self, Layout, What};
-use crate::worker::{Event, Request, Scan, SharedScan, Worker};
+use crate::worker::{Event, Removal, Request, Scan, SharedScan, Worker};
 
 enum Phase {
     Starting,
@@ -98,8 +98,12 @@ impl CleanupView {
 
 /// A removal waiting for the person to say yes.
 struct Confirm {
-    paths: Vec<String>,
+    items: Vec<Removal>,
     bytes: u64,
+    /// Large, broad or the person's own files: the Move button waits for
+    /// an explicit "I know what this is".
+    weighty: bool,
+    acknowledged: bool,
 }
 
 /// The duplicates tab: a search that can be running, and what it found.
@@ -169,10 +173,12 @@ enum Action {
     Open(String),
     Reveal(String),
     Copy(String),
-    /// Ask to move these to the recycle bin; ytes is what they hold.
+    /// Ask to move these to the recycle bin; `bytes` is what they hold and
+    /// `weighty` asks for an explicit acknowledgement before they go.
     Recycle {
-        paths: Vec<String>,
+        items: Vec<Removal>,
         bytes: u64,
+        weighty: bool,
     },
 }
 
@@ -527,7 +533,11 @@ impl DiskApp {
                     }
                     self.cleanup.list = list;
                 }
-                Event::Recycled { result, bytes } => {
+                Event::Recycled {
+                    result,
+                    bytes,
+                    refused,
+                } => {
                     self.recycling = false;
                     // Whatever went is no longer a duplicate of anything.
                     self.dupes
@@ -543,11 +553,15 @@ impl DiskApp {
                     // Ask the rules again once the watcher has caught up.
                     self.cleanup.generation = None;
                     self.cleanup.asked = None;
-                    let text = self.lang.recycled(
+                    let mut text = self.lang.recycled(
                         result.gone,
                         result.requested,
                         &format::size(self.lang, bytes),
                     );
+                    if refused > 0 {
+                        text.push(' ');
+                        text.push_str(&self.lang.refused(refused));
+                    }
                     self.inform(text);
                 }
                 Event::DupesProgress(progress) => {
@@ -688,9 +702,20 @@ impl DiskApp {
                 }
                 Action::Open(path) => self.worker.send(Request::Open(path)),
                 Action::Reveal(path) => self.worker.send(Request::Reveal(path)),
-                Action::Recycle { paths, bytes } => {
-                    if !paths.is_empty() && !self.recycling {
-                        self.confirm = Some(Confirm { paths, bytes });
+                Action::Recycle {
+                    items,
+                    bytes,
+                    weighty,
+                } => {
+                    if !items.is_empty() && !self.recycling {
+                        // Big or broad removals always ask twice.
+                        let weighty = weighty || bytes >= 1 << 30 || items.len() >= 200;
+                        self.confirm = Some(Confirm {
+                            items,
+                            bytes,
+                            weighty,
+                            acknowledged: false,
+                        });
                     }
                 }
                 Action::Copy(path) => {
@@ -1486,9 +1511,11 @@ impl DiskApp {
         }
 
         // Removal: tick copies by hand, or keep one per group and tick the rest.
-        let protected = |node: NodeId| {
-            !scan.tree.contains(node) || cleanup::is_protected(&scan.index, &scan.tree, node)
-        };
+        // Candidates already passed the safety policy; the disk may have
+        // changed since, so a copy is asked again before it can be ticked.
+        let profile = shell::profile_name();
+        let policy = burrow_tree::safety::Policy::new(&scan.index, &scan.tree, &profile);
+        let protected = |node: NodeId| !policy.allows(node);
         if !running && !self.dupes.groups.is_empty() {
             let words = lang.words();
             ui.horizontal(|ui| {
@@ -1498,17 +1525,8 @@ impl DiskApp {
                     .clicked()
                 {
                     self.dupes.chosen.clear();
-                    // Only groups whose every copy is in the person's own
-                    // folders; where an application keeps a copy, it may be
-                    // reading it from that very path.
-                    for group in self.dupes.groups.iter().filter(|g| dupes::safe_to_thin(g)) {
-                        // Keep the copy with the shortest path — usually the
-                        // original, the others being copies made into deeper
-                        // folders.
-                        let keep = group
-                            .files
-                            .iter()
-                            .min_by_key(|f| (f.path.len(), f.path.clone()));
+                    for group in &self.dupes.groups {
+                        let keep = keeper(group);
                         for file in &group.files {
                             if Some(file) != keep && !protected(file.node) {
                                 self.dupes.chosen.insert(file.path.clone());
@@ -1521,12 +1539,18 @@ impl DiskApp {
                     self.dupes.chosen.clear();
                 }
             });
+            // Never the last copy: in a group where every copy is ticked,
+            // the keeper stays, whatever was ticked by hand.
             let chosen: Vec<&dupes::Candidate> = self
                 .dupes
                 .groups
                 .iter()
-                .flat_map(|g| g.files.iter())
-                .filter(|f| self.dupes.chosen.contains(&f.path))
+                .flat_map(|g| {
+                    let all = g.files.iter().all(|f| self.dupes.chosen.contains(&f.path));
+                    let keep = if all { keeper(g) } else { None };
+                    g.files.iter().filter(move |f| Some(*f) != keep)
+                })
+                .filter(|f| self.dupes.chosen.contains(&f.path) && !protected(f.node))
                 .collect();
             if !chosen.is_empty() {
                 let bytes: u64 = chosen
@@ -1543,8 +1567,15 @@ impl DiskApp {
                     .clicked()
                 {
                     actions.push(Action::Recycle {
-                        paths: chosen.iter().map(|f| f.path.clone()).collect(),
+                        items: chosen
+                            .iter()
+                            .map(|f| Removal {
+                                path: f.path.clone(),
+                                trusted: false,
+                            })
+                            .collect(),
                         bytes,
+                        weighty: false,
                     });
                 }
             }
@@ -1602,9 +1633,8 @@ impl DiskApp {
                             table_row.col(|ui| {
                                 // Protected places are no longer searched, but a
                                 // result can outlive a change on disk.
-                                if protected(file.node) {
-                                    padlock(ui, palette.muted)
-                                        .on_hover_text(lang.words().protected);
+                                if let Err(block) = policy.check(file.node) {
+                                    padlock(ui, palette.muted).on_hover_text(lang.block(block));
                                 } else {
                                     let mut on = self.dupes.chosen.contains(&file.path);
                                     if ui.checkbox(&mut on, "").changed() {
@@ -1620,14 +1650,6 @@ impl DiskApp {
                                     scan.tree.root(),
                                 );
                                 ui.add(egui::Label::new(name).selectable(false));
-                                if dupes::owned_by_an_app(&file.path) {
-                                    ui.label(
-                                        egui::RichText::new(lang.words().app_folder)
-                                            .small()
-                                            .color(palette.danger),
-                                    )
-                                    .on_hover_text(lang.words().app_folder_note);
-                                }
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(folder).small().color(palette.muted),
@@ -1646,7 +1668,9 @@ impl DiskApp {
                             }
                             response.context_menu(|ui| {
                                 ui.set_min_width(200.0);
-                                if ui.button(strings.menu_open).clicked() {
+                                if !runs_when_opened(&file.path)
+                                    && ui.button(strings.menu_open).clicked()
+                                {
                                     actions.push(Action::Open(file.path.clone()));
                                     ui.close();
                                 }
@@ -1729,10 +1753,15 @@ impl DiskApp {
                 format::size(lang, chosen_bytes)
             );
             if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                let paths = removal_paths(scan, &chosen);
+                // Anything marked "careful" is the person's own files: ask
+                // for the explicit acknowledgement.
+                let weighty = chosen
+                    .iter()
+                    .any(|s| s.rule.safety == cleanup::Safety::Careful);
                 actions.push(Action::Recycle {
-                    paths,
+                    items: removal_items(scan, &chosen),
                     bytes: chosen_bytes,
+                    weighty,
                 });
             }
             if self.recycling {
@@ -1914,48 +1943,68 @@ impl DiskApp {
 
     /// The "are you sure" for any removal, from anywhere in the window.
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
-        let Some(confirm) = &self.confirm else { return };
+        let Some(confirm) = &mut self.confirm else {
+            return;
+        };
         let lang = self.lang;
         let words = lang.words();
         let palette = theme::palette(self.theme);
         let mut decided: Option<bool> = None;
 
         let modal = egui::Modal::new(egui::Id::new("confirm-recycle")).show(ctx, |ui| {
-            ui.set_width(460.0);
+            ui.set_width(480.0);
             ui.label(egui::RichText::new(words.confirm_title).heading());
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(
-                    lang.recycle_count(confirm.paths.len(), &format::size(lang, confirm.bytes)),
+                    lang.recycle_count(confirm.items.len(), &format::size(lang, confirm.bytes)),
                 )
                 .strong(),
             );
             ui.add_space(4.0);
-            for path in confirm.paths.iter().take(6) {
+            for item in confirm.items.iter().take(6) {
                 ui.add(
-                    egui::Label::new(egui::RichText::new(path).small().color(palette.muted))
+                    egui::Label::new(egui::RichText::new(&item.path).small().color(palette.muted))
                         .truncate(),
                 );
             }
-            if confirm.paths.len() > 6 {
+            if confirm.items.len() > 6 {
                 ui.label(
-                    egui::RichText::new(format!("… +{}", confirm.paths.len() - 6))
+                    egui::RichText::new(format!("… +{}", confirm.items.len() - 6))
                         .small()
                         .color(palette.muted),
                 );
             }
             ui.add_space(8.0);
             ui.label(egui::RichText::new(words.confirm_detail).small());
+            ui.add_space(6.0);
+            // The one moment Windows itself could delete for good: a file too
+            // large for the Recycle Bin. Say plainly what to answer.
+            ui.label(
+                egui::RichText::new(words.nuke_warning)
+                    .small()
+                    .strong()
+                    .color(palette.danger),
+            );
+            if confirm.weighty {
+                ui.add_space(8.0);
+                ui.checkbox(&mut confirm.acknowledged, words.acknowledge);
+            }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
+                // Cancel first, where the eye and the hand land.
                 if ui
-                    .button(egui::RichText::new(words.confirm_action).strong())
+                    .button(egui::RichText::new(words.cancel).strong())
+                    .clicked()
+                {
+                    decided = Some(false);
+                }
+                let ready = !confirm.weighty || confirm.acknowledged;
+                if ui
+                    .add_enabled(ready, egui::Button::new(words.confirm_action))
                     .clicked()
                 {
                     decided = Some(true);
-                }
-                if ui.button(words.cancel).clicked() {
-                    decided = Some(false);
                 }
             });
         });
@@ -1964,10 +2013,11 @@ impl DiskApp {
         }
         match decided {
             Some(true) => {
-                if let Some(confirm) = self.confirm.take() {
+                if let (Some(confirm), Some(scan)) = (self.confirm.take(), self.scan.clone()) {
                     self.recycling = true;
                     self.worker.send(Request::Recycle {
-                        paths: confirm.paths,
+                        scan,
+                        items: confirm.items,
                         bytes: confirm.bytes,
                     });
                 }
@@ -2192,30 +2242,32 @@ fn change_colour(palette: &theme::Palette, delta: i64) -> egui::Color32 {
     }
 }
 
-/// The paths to hand the recycle bin for a set of suggestions: a cache
-/// folder's contents, or the matched thing itself.
-fn removal_paths(scan: &Scan, chosen: &[&cleanup::Suggestion]) -> Vec<String> {
+/// What to hand the recycle bin for a set of suggestions: a cache folder's
+/// contents, or the matched thing itself. Each carries whether its rule is
+/// one of the reviewed paths the safety policy lets further in.
+fn removal_items(scan: &Scan, chosen: &[&cleanup::Suggestion]) -> Vec<Removal> {
     let tree = &scan.tree;
-    let mut paths = Vec::new();
+    let mut items = Vec::new();
     for suggestion in chosen {
+        let trusted = suggestion.rule.is_trusted();
+        let item = |node: NodeId| Removal {
+            path: tree.path(&scan.index, node),
+            trusted,
+        };
         for &target in &suggestion.targets {
             if !tree.contains(target) {
                 continue;
             }
             match suggestion.rule.mode {
                 cleanup::Mode::Contents => {
-                    paths.extend(
-                        tree.children(target)
-                            .iter()
-                            .map(|c| tree.path(&scan.index, *c)),
-                    );
+                    items.extend(tree.children(target).iter().map(|c| item(*c)))
                 }
-                cleanup::Mode::Itself => paths.push(tree.path(&scan.index, target)),
+                cleanup::Mode::Itself => items.push(item(target)),
                 cleanup::Mode::Info => {}
             }
         }
     }
-    paths
+    items
 }
 
 /* -------------------------------------------------------------------- *
@@ -2440,7 +2492,10 @@ fn node_menu(ui: &mut egui::Ui, lang: Lang, scan: &Scan, node: NodeId, actions: 
     let strings = lang.strings();
     let path = scan.tree.path(&scan.index, node);
     ui.set_min_width(200.0);
-    if ui.button(strings.menu_open).clicked() {
+    // "Open" on a program, a script or a .reg file does not open it, it runs
+    // it. From a disk map that is never what was meant.
+    let runnable = !scan.tree.is_dir(node) && runs_when_opened(&path);
+    if !runnable && ui.button(strings.menu_open).clicked() {
         actions.push(Action::Open(path.clone()));
         ui.close();
     }
@@ -2458,16 +2513,36 @@ fn node_menu(ui: &mut egui::Ui, lang: Lang, scan: &Scan, node: NodeId, actions: 
     }
     ui.separator();
     let words = lang.words();
-    let protected = cleanup::is_protected(&scan.index, &scan.tree, node);
-    let button = ui.add_enabled(!protected, egui::Button::new(words.menu_recycle));
-    let button = button.on_disabled_hover_text(words.protected);
+    let profile = shell::profile_name();
+    let verdict = burrow_tree::safety::Policy::new(&scan.index, &scan.tree, &profile).check(node);
+    let button = ui.add_enabled(verdict.is_ok(), egui::Button::new(words.menu_recycle));
+    let button = match verdict {
+        Err(block) => button.on_disabled_hover_text(lang.block(block)),
+        Ok(()) => button,
+    };
     if button.clicked() {
         actions.push(Action::Recycle {
-            paths: vec![path],
+            items: vec![Removal {
+                path,
+                trusted: false,
+            }],
             bytes: scan.tree.totals(node).allocated,
+            // A folder taken by hand can hold anything: ask twice.
+            weighty: scan.tree.is_dir(node),
         });
         ui.close();
     }
+}
+
+/// Files that Windows runs, installs or merges rather than shows.
+fn runs_when_opened(path: &str) -> bool {
+    const RUNNABLE: &[&str] = &[
+        "exe", "com", "scr", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh",
+        "msi", "msp", "msix", "appx", "reg", "lnk", "url", "hta", "cpl", "jar", "pif", "inf",
+        "sys", "dll",
+    ];
+    let ext = burrow_tree::kinds::extension(path.rsplit('\\').next().unwrap_or(path));
+    RUNNABLE.iter().any(|r| ext.eq_ignore_ascii_case(r))
 }
 
 fn heading(ui: &mut egui::Ui, label: &str, right: bool, palette: &theme::Palette) {
@@ -2509,6 +2584,15 @@ fn share_bar(ui: &mut egui::Ui, lang: Lang, part: u64, whole: u64, palette: &the
         )
         .selectable(false),
     );
+}
+
+/// The copy "keep one" keeps: the shortest path — usually the original, the
+/// others being copies made into deeper folders.
+fn keeper(group: &dupes::Group) -> Option<&dupes::Candidate> {
+    group
+        .files
+        .iter()
+        .min_by_key(|f| (f.path.len(), f.path.clone()))
 }
 
 /// A small padlock, drawn: the emoji is not in every font Windows has, and
