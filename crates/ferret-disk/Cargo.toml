@@ -1,0 +1,34 @@
+[package]
+name = "ferret-disk"
+description = "Why is my disk full? A treemap of an NTFS volume, read in seconds."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ferret-disk"
+path = "src/main.rs"
+
+[dependencies]
+ferret-core = { path = "../ferret-core" }
+ferret-tree = { path = "../ferret-tree" }
+# `glow` rather than `wgpu`: flat rectangles and text, a fast start, and no
+# Direct3D stack. `persistence` remembers the drive, theme and language.
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "persistence",
+    "accesskit",
+] }
+egui_extras = "0.36"
+serde = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+ferret-core = { path = "../ferret-core", features = ["testing"] }
+serde_json = "1"

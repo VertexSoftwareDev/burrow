@@ -4,6 +4,7 @@ members = [
     "crates/ferret-core",
     "crates/ferret-tree",
     "crates/ferret-disk-cli",
+    "crates/ferret-disk",
 ]
 
 [workspace.package]
