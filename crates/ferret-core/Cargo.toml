@@ -1,0 +1,12 @@
+[package]
+name = "ferret-core"
+description = "NTFS master file table reader and in-memory file index for Ferret."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Exposes hand-built indexes so dependent crates can test without a disk.
+testing = []
+
+[dependencies]
