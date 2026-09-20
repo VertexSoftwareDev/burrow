@@ -50,10 +50,15 @@ fn main() -> eframe::Result {
                     .and_then(|i| args.get(i + 1))
                     .cloned()
             };
+            let number = |name: &str, default: u64| -> u64 {
+                flag(name).and_then(|v| v.parse().ok()).unwrap_or(default)
+            };
             app::Screenshot {
                 path,
                 tab: flag("--tab"),
                 lang: flag("--lang"),
+                shots: number("--shots", 1) as u32,
+                every_ms: number("--every-ms", 1500),
             }
         });
 

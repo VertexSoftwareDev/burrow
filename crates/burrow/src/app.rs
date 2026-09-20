@@ -209,6 +209,18 @@ pub struct DiskApp {
     focus: NodeId,
     /// The tree's root id, which moves when live changes add entries.
     root: NodeId,
+    /// When the views last followed the disk, and what the folder on screen
+    /// held then. A busy machine changes thousands of files a minute, and
+    /// laying the map out again for each of them makes every tile jump
+    /// under the eye of someone trying to read it: tiles are placed largest
+    /// first, so one temporary file appearing shifts everything after it.
+    ///
+    /// So the disk's own churn moves the views only when it amounts to
+    /// something ([`MATERIAL`] of what is on screen) or when they have
+    /// stood still for [`SETTLE`]. Anything the person does — opening a
+    /// folder, changing what is measured, removing something — moves them
+    /// at once.
+    followed: Option<(Instant, u64)>,
     layout: Option<Layout>,
     hovered: Option<NodeId>,
     /// What the map's context menu is about.
@@ -220,8 +232,11 @@ pub struct DiskApp {
     dupes: DupesView,
     cleanup: CleanupView,
     changes: ChangesView,
-    /// When the current scan finished, in Unix seconds.
+    /// When the current scan finished, in Unix seconds — for choosing which
+    /// snapshot to compare with.
     scanned_at: u64,
+    /// And on this machine's clock, for saying how old the picture is.
+    scanned_when: Option<Instant>,
     confirm: Option<Confirm>,
     recycling: bool,
 
@@ -236,6 +251,9 @@ pub struct Screenshot {
     pub tab: Option<String>,
     /// `tr` or `en`, overriding the saved language for this run.
     pub lang: Option<String>,
+    /// More than one picture, spaced out, to catch a moving layout.
+    pub shots: u32,
+    pub every_ms: u64,
 }
 
 /// A pending `--screenshot`: wait for the scan and a few settled frames,
@@ -246,6 +264,13 @@ struct Shot {
     tab: Option<String>,
     frames_ready: u32,
     requested: bool,
+    /// How many pictures are still wanted, and how long to wait between
+    /// them: a layout that wobbles frame to frame shows up as a difference
+    /// between two of these, which one picture could never show.
+    left: u32,
+    every: Duration,
+    taken: u32,
+    next: Option<Instant>,
 }
 
 impl DiskApp {
@@ -285,6 +310,7 @@ impl DiskApp {
             scroll_to_row: false,
             focus: 0,
             root: 0,
+            followed: None,
             layout: None,
             hovered: None,
             menu_node: None,
@@ -294,6 +320,7 @@ impl DiskApp {
             cleanup: CleanupView::new(),
             changes: ChangesView::new(),
             scanned_at: 0,
+            scanned_when: None,
             confirm: None,
             recycling: false,
             toast: None,
@@ -303,6 +330,10 @@ impl DiskApp {
                 tab: s.tab,
                 frames_ready: 0,
                 requested: false,
+                left: s.shots.max(1),
+                every: Duration::from_millis(s.every_ms.max(1)),
+                taken: 0,
+                next: None,
             }),
         }
     }
@@ -318,16 +349,23 @@ impl DiskApp {
         if let Some(image) = captured {
             let [w, h] = image.size;
             let bytes: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
-            let _ = image::save_buffer(
-                &shot.path,
-                &bytes,
-                w as u32,
-                h as u32,
-                image::ColorType::Rgba8,
-            );
-            self.shot = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
+            shot.taken += 1;
+            let path = if shot.left <= 1 && shot.taken == 1 {
+                shot.path.clone()
+            } else {
+                let stem = shot.path.file_stem().unwrap_or_default().to_string_lossy();
+                shot.path
+                    .with_file_name(format!("{stem}-{}.png", shot.taken))
+            };
+            let _ = image::save_buffer(&path, &bytes, w as u32, h as u32, image::ColorType::Rgba8);
+            shot.left -= 1;
+            if shot.left == 0 {
+                self.shot = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            shot.requested = false;
+            shot.next = Some(Instant::now() + shot.every);
         }
         let mut settled = matches!(
             self.phase,
@@ -364,7 +402,8 @@ impl DiskApp {
                 _ => {}
             }
         }
-        if settled && !shot.requested {
+        let waiting = shot.next.is_some_and(|at| Instant::now() < at);
+        if settled && !shot.requested && !waiting {
             shot.frames_ready += 1;
             if shot.frames_ready >= 5 {
                 shot.requested = true;
@@ -482,6 +521,7 @@ impl DiskApp {
                     self.cleanup.list.clear();
                     self.cleanup.generation = None;
                     self.changes = ChangesView::new();
+                    self.scanned_when = Some(Instant::now());
                     self.scanned_at = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
@@ -554,6 +594,8 @@ impl DiskApp {
                     }
                     self.dupes.groups.retain(|g| g.files.len() > 1);
                     self.dupes.relayout();
+                    // Show the result of our own removal at once.
+                    self.followed = None;
                     // Ask the rules again once the watcher has caught up.
                     self.cleanup.generation = None;
                     self.cleanup.asked = None;
@@ -746,6 +788,12 @@ impl eframe::App for DiskApp {
         }
         self.handle_keys(ctx);
         self.drive_screenshot(ctx);
+
+        // Nothing else would repaint an idle window, and the status bar would
+        // go on saying the scan was "just now" an hour later.
+        if matches!(self.phase, Phase::Ready) {
+            ctx.request_repaint_after(Duration::from_secs(2));
+        }
 
         if let Some((_, since)) = &self.toast {
             let left = Duration::from_secs(3).saturating_sub(since.elapsed());
@@ -976,14 +1024,19 @@ impl DiskApp {
                         );
                         let strings = lang.strings();
                         if scan.live {
+                            let age = self
+                                .scanned_when
+                                .map(|at| at.elapsed().as_secs())
+                                .unwrap_or(0);
+                            let detail = lang.live_detail(scan.changes);
                             ui.label(egui::RichText::new("●").small().color(palette.accent))
-                                .on_hover_text(strings.live_tooltip);
+                                .on_hover_text(&detail);
                             ui.label(
-                                egui::RichText::new(lang.live(scan.changes))
+                                egui::RichText::new(lang.since_scan(age))
                                     .small()
                                     .color(palette.muted),
                             )
-                            .on_hover_text(strings.live_tooltip);
+                            .on_hover_text(&detail);
                         } else {
                             ui.label(
                                 egui::RichText::new(strings.not_live)
@@ -1112,8 +1165,15 @@ impl DiskApp {
     }
 
     fn folders(&mut self, ui: &mut egui::Ui, scan: &Scan, actions: &mut Vec<Action>) {
+        // Opening or closing a folder clears `rows_for`, so what the person
+        // does lands at once; the disk's own churn waits for `SETTLE`.
+        let due = self.should_follow(scan.tree.totals(scan.tree.root()).allocated);
         let key = (scan.generation, self.metric);
-        if self.rows_for != Some(key) {
+        let stale = match self.rows_for {
+            None => true,
+            Some((generation, metric)) => metric != self.metric || (generation != key.0 && due),
+        };
+        if stale {
             self.rows = rows::flatten(&scan.tree, &self.expanded, self.metric);
             self.rows_for = Some(key);
         }
@@ -1245,8 +1305,11 @@ impl DiskApp {
 
     fn largest(&mut self, ui: &mut egui::Ui, scan: &Scan, actions: &mut Vec<Action>) {
         let metric = self.metric;
-        let fresh =
-            matches!(&self.largest, Some((g, m, _)) if *g == scan.generation && *m == metric);
+        let due = self.should_follow(scan.tree.totals(scan.tree.root()).allocated);
+        let fresh = matches!(
+            &self.largest,
+            Some((g, m, _)) if *m == metric && (*g == scan.generation || !due)
+        );
         if !fresh {
             let mut list = scan.tree.largest_files(1000);
             list.sort_by_key(|n| std::cmp::Reverse(value(&scan.tree, *n, metric)));
@@ -1329,8 +1392,11 @@ impl DiskApp {
 
     fn kinds(&mut self, ui: &mut egui::Ui, scan: &Scan) {
         let focus = self.focus;
-        let fresh =
-            matches!(&self.kinds, Some((g, f, _, _)) if *g == scan.generation && *f == focus);
+        let due = self.should_follow(scan.tree.totals(scan.tree.root()).allocated);
+        let fresh = matches!(
+            &self.kinds,
+            Some((g, f, _, _)) if *f == focus && (*g == scan.generation || !due)
+        );
         if !fresh {
             let kinds = scan.tree.kinds_under(&scan.index, focus);
             let mut exts = scan.tree.extensions_under(&scan.index, focus);
@@ -2351,6 +2417,8 @@ impl DiskApp {
                 let (rect, response) =
                     ui.allocate_exact_size(size.max(egui::vec2(10.0, 10.0)), egui::Sense::click());
 
+                let holds = value(tree, self.focus, self.metric);
+                let due = self.should_follow(holds);
                 let key = treemap::Key {
                     generation: scan.generation,
                     focus: self.focus,
@@ -2358,8 +2426,21 @@ impl DiskApp {
                     metric: self.metric,
                     theme: self.theme,
                 };
-                if self.layout.as_ref().map(|l| l.key) != Some(key) {
+                let stale = match self.layout.as_ref().map(|l| l.key) {
+                    None => true,
+                    // Everything but the generation is the person's own
+                    // doing, and is followed at once.
+                    Some(had) => {
+                        had.focus != key.focus
+                            || had.rect != key.rect
+                            || had.metric != key.metric
+                            || had.theme != key.theme
+                            || (had.generation != key.generation && due)
+                    }
+                };
+                if stale {
                     self.layout = Some(Layout::build(index, tree, key));
+                    self.followed = Some((Instant::now(), holds));
                 }
                 let layout = self.layout.as_ref().expect("layout just built");
 
@@ -2601,6 +2682,27 @@ fn share_bar(ui: &mut egui::Ui, lang: Lang, part: u64, whole: u64, palette: &the
         )
         .selectable(false),
     );
+}
+
+/// How long the views stay put while the disk changes by little.
+const SETTLE: Duration = Duration::from_secs(15);
+
+/// A change worth redrawing for, as a share of what is on screen.
+const MATERIAL: f64 = 0.005;
+
+impl DiskApp {
+    /// Whether the views should follow the disk again: nothing has been
+    /// drawn yet, enough of what is on screen has changed, or they have
+    /// stood still long enough.
+    fn should_follow(&self, holds_now: u64) -> bool {
+        match self.followed {
+            None => true,
+            Some((at, held)) => {
+                let moved = holds_now.abs_diff(held) as f64;
+                at.elapsed() >= SETTLE || moved >= held.max(1) as f64 * MATERIAL
+            }
+        }
+    }
 }
 
 /// The copy "keep one" keeps: the shortest path — usually the original, the

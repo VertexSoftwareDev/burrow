@@ -168,7 +168,10 @@ impl Tree {
         // Largest first, so a folder view and a treemap both read straight off.
         for node in 0..nodes {
             let range = child_start[node] as usize..child_start[node + 1] as usize;
-            children[range].sort_unstable_by_key(|c| Reverse(totals[*c as usize].allocated));
+            // The node id breaks ties, so two files of the same size keep
+            // their order every time the tree is built again — otherwise a
+            // live update would shuffle them under the reader's eyes.
+            children[range].sort_unstable_by_key(|c| (Reverse(totals[*c as usize].allocated), *c));
         }
 
         Tree {
@@ -283,7 +286,7 @@ impl Tree {
             }
         }
         let mut out: Vec<(u64, NodeId)> = heap.into_iter().map(|Reverse(x)| x).collect();
-        out.sort_unstable_by_key(|(bytes, _)| Reverse(*bytes));
+        out.sort_unstable_by_key(|(bytes, node)| (Reverse(*bytes), *node));
         out.into_iter().map(|(_, id)| id).collect()
     }
 

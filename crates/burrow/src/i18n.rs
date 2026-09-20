@@ -300,14 +300,42 @@ impl Lang {
         }
     }
 
-    /// The live badge: canlı · 12 değişiklik.
-    pub fn live(self, changes: u64) -> String {
+    /// The live badge: how long ago the scan behind this picture was made.
+    /// A count of changes says how busy the disk is, which is not what
+    /// anybody came to find out; how old the picture is, is.
+    pub fn since_scan(self, seconds: u64) -> String {
+        let when = match (self, seconds) {
+            (Lang::Tr, s) if s < 10 => "az önce".to_string(),
+            (Lang::Tr, s) if s < 60 => format!("{s} sn önce"),
+            (Lang::Tr, s) if s < 3600 => format!("{} dk önce", s / 60),
+            (Lang::Tr, s) => format!("{} sa önce", s / 3600),
+            (Lang::En, s) if s < 10 => "just now".to_string(),
+            (Lang::En, s) if s < 60 => format!("{s} s ago"),
+            (Lang::En, s) if s < 3600 => format!("{} min ago", s / 60),
+            (Lang::En, s) => format!("{} h ago", s / 3600),
+        };
+        match self {
+            Lang::Tr => format!("canlı · tarama {when}"),
+            Lang::En => format!("live · scanned {when}"),
+        }
+    }
+
+    /// What the live badge says on hover: the watching, and how much of it
+    /// there has been.
+    pub fn live_detail(self, changes: u64) -> String {
         let count = self.number(changes);
-        match (self, changes) {
-            (Lang::Tr, 0) => "canlı".into(),
-            (Lang::En, 0) => "live".into(),
-            (Lang::Tr, _) => format!("canlı · {count} değişiklik"),
-            (Lang::En, _) => format!("live · {count} changes"),
+        let watching = self.strings().live_tooltip;
+        match self {
+            Lang::Tr => format!(
+                "{watching}
+
+Taramadan beri {count} değişiklik izlendi."
+            ),
+            Lang::En => format!(
+                "{watching}
+
+{count} changes followed since the scan."
+            ),
         }
     }
 
