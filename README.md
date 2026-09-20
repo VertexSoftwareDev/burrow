@@ -9,6 +9,8 @@ looked.
 
 [Türkçe](README.tr.md)
 
+![Burrow on a 465 GB system drive](docs/screenshot-en.png)
+
 ## What it does
 
 - **Scans in seconds.** Instead of walking directories — millions of system
@@ -46,6 +48,20 @@ looked.
   profile's own skeleton and applications' data cannot be removed from here,
   each refusal saying why.
 - Turkish and English, dark and light.
+
+### Clean up
+
+Each suggestion says how sure it is and what it would remove; the safe ones
+are ticked, and everything removed goes to the Recycle Bin.
+
+![The clean-up tab](docs/cleanup-en.png)
+
+### Duplicates
+
+Copies an application or Windows reads from an exact path are shown with a
+padlock: the waste is real and worth seeing, but it is not Burrow's to free.
+
+![The duplicates tab](docs/duplicates-en.png)
 
 ## Measured
 

@@ -9,6 +9,8 @@ beri neyin büyüdüğünü gösterir.
 
 [English](README.md)
 
+![465 GB'lık bir sistem diskinde Burrow](docs/screenshot-tr.png)
+
 ## Neler yapar
 
 - **Saniyeler içinde tarar.** Klasörleri tek tek gezmek yerine (milyonlarca
@@ -48,6 +50,21 @@ beri neyin büyüdüğünü gösterir.
   dosyaları, profilin kendi iskeleti ve uygulama verileri buradan silinemez,
   her ret nedeniyle birlikte söylenir.
 - Türkçe ve İngilizce, koyu ve açık tema.
+
+### Temizlik
+
+Her öneri ne kadar emin olduğunu ve neyi kaldıracağını söyler. Güvenli olanlar
+işaretli gelir ve kaldırılan her şey Geri Dönüşüm Kutusu'na gider.
+
+![Temizlik sekmesi](docs/cleanup-en.png)
+
+### Kopyalar
+
+Bir uygulamanın veya Windows'un tam o yoldan kullandığı kopyalar asma kilitle
+gösterilir: israf gerçektir ve görülmeye değer, ama Burrow'un silebileceği bir
+şey değildir.
+
+![Kopyalar sekmesi](docs/duplicates-en.png)
 
 ## Ölçümler
 

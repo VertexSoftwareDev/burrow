@@ -338,10 +338,10 @@ impl Lang {
     pub fn dupes_locked(self, bytes: &str) -> String {
         match self {
             Lang::Tr => format!(
-                "Ayrıca {bytes}, uygulamaların ve Windows'un kendi klasörlerinde duruyor.                  Oradan silinmez, çünkü uygulamalar dosyalarını tam o yollardan kullanır."
+                "Kilitli {bytes} daha var: uygulamaların ve Windows'un kendi klasörlerinde, buradan silinemez."
             ),
             Lang::En => format!(
-                "Another {bytes} sits in applications' and Windows' own folders.                  It cannot go from here: those applications read their files from exactly those paths."
+                "Another {bytes} is locked: it sits in applications' and Windows' own folders."
             ),
         }
     }
