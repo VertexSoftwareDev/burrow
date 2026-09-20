@@ -18,7 +18,7 @@ pub enum Metric {
     Size,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct Prefs {
     pub lang: Lang,
@@ -26,17 +26,6 @@ pub struct Prefs {
     /// Drive letter, or empty for "the system drive".
     pub drive: String,
     pub metric: Metric,
-}
-
-impl Default for Prefs {
-    fn default() -> Self {
-        Self {
-            lang: Lang::default(),
-            theme: Theme::default(),
-            drive: String::new(),
-            metric: Metric::default(),
-        }
-    }
 }
 
 #[cfg(test)]

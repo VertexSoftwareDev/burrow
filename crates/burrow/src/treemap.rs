@@ -233,7 +233,7 @@ impl Builder<'_> {
         }
         // Already largest-first by size on disk; logical size can differ.
         if self.metric == Metric::Size {
-            children.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            children.sort_unstable_by_key(|(_, value)| std::cmp::Reverse(*value));
         }
 
         let total: u64 = children.iter().map(|(_, v)| v).sum();

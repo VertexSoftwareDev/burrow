@@ -21,14 +21,19 @@
 //! duplicates of each other — the index holds one entry per file, not per
 //! name.
 //!
-//! What is never *looked at*: every place the [`crate::safety::Policy`]
-//! refuses — Windows, installed programs, the Recycle Bin, application data,
-//! other people's profiles. Identical contents there are not waste. Windows keeps
-//! `Sessions.xml` beside `Sessions.back.xml` on purpose, to recover from an
-//! update that fails halfway; a game ships the same asset in two packages
-//! because it loads them separately; the Recycle Bin holds copies of what
-//! was just removed as duplicates. None of it can be removed from here, so
-//! none of it is counted as space that could be freed.
+//! # What may go, and what only explains itself
+//!
+//! Most of what a disk wastes on duplicates is not the person's to remove:
+//! a launcher keeps the same jar under every version it has, a browser
+//! caches the same asset in six profiles, Windows keeps `Sessions.xml`
+//! beside `Sessions.back.xml` on purpose. Hiding all of that would answer
+//! "where did my space go?" with silence.
+//!
+//! So every copy is listed, and each carries whether
+//! [`crate::safety::Policy`] would let it go ([`Candidate::removable`]).
+//! What it refuses is shown locked, counted in [`Group::wasted`] — the
+//! waste is real — but never in [`Group::reclaimable`], which is what
+//! Burrow itself could free.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -50,6 +55,11 @@ pub struct Candidate {
     pub node: NodeId,
     pub path: String,
     pub size: u64,
+    /// Whether the safety policy would let this copy go. Copies it refuses
+    /// are still listed — most of what a disk wastes on duplicates sits in
+    /// application folders, and seeing where it went is worth something
+    /// even when the answer is "leave it alone".
+    pub removable: bool,
 }
 
 /// Files with identical contents.
@@ -60,9 +70,21 @@ pub struct Group {
 }
 
 impl Group {
-    /// Space that deleting all but one copy would free.
+    /// Space that deleting all but one copy would free, whoever could do it.
     pub fn wasted(&self) -> u64 {
         self.size * (self.files.len() as u64).saturating_sub(1)
+    }
+
+    /// Of that, what Burrow could actually free: the copies the safety
+    /// policy allows, never counting the last copy of the group.
+    pub fn reclaimable(&self) -> u64 {
+        let removable = self.files.iter().filter(|f| f.removable).count() as u64;
+        self.size * removable.min(self.files.len() as u64 - 1)
+    }
+
+    /// Whether any copy here is one Burrow may remove.
+    pub fn has_removable(&self) -> bool {
+        self.files.iter().any(|f| f.removable)
     }
 }
 
@@ -99,19 +121,20 @@ pub fn candidates(index: &Index, tree: &Tree, min_size: u64, profile: &str) -> V
                 || entry.allocated == 0
                 || entry.record < 16
                 || index.name_of(entry).starts_with('$') && entry.parent == ferret_core::ROOT_RECORD;
-            // Checked last: it walks the parent chain, and the size test
-            // above has already ruled out almost every file.
-            if skip || !policy.allows(node) {
+            if skip {
                 return None;
             }
             Some(Candidate {
                 node,
                 path: tree.path(index, node),
                 size: entry.size,
+                // Walks the parent chain, so it is asked last: the size test
+                // above has already ruled out almost every file.
+                removable: policy.allows(node),
             })
         })
         .collect();
-    out.sort_by(|a, b| b.size.cmp(&a.size));
+    out.sort_by_key(|c| std::cmp::Reverse(c.size));
     out
 }
 
@@ -187,9 +210,12 @@ pub fn find(
         })
         .collect();
 
+    // What can be acted on first, then the plain size of the waste.
     groups.sort_by(|a, b| {
-        b.wasted()
-            .cmp(&a.wasted())
+        b.has_removable()
+            .cmp(&a.has_removable())
+            .then(b.reclaimable().cmp(&a.reclaimable()))
+            .then(b.wasted().cmp(&a.wasted()))
             .then(a.files[0].path.cmp(&b.files[0].path))
     });
     groups
@@ -296,6 +322,7 @@ mod tests {
                 node: i as NodeId,
                 path: p.to_string(),
                 size: d.len() as u64,
+                removable: true,
             })
             .collect();
         find(candidates, &source, &AtomicBool::new(false), &|_| {})
@@ -357,6 +384,7 @@ mod tests {
                 node: i as NodeId,
                 path: p.to_string(),
                 size: 200_000,
+                removable: true,
             })
             .collect();
         let groups = find(candidates, &source, &AtomicBool::new(false), &|_| {});
@@ -379,6 +407,7 @@ mod tests {
                 node: i as NodeId,
                 path: p.to_string(),
                 size: 200_000,
+                removable: true,
             })
             .collect();
         assert!(find(candidates, &source, &AtomicBool::new(true), &|_| {}).is_empty());
@@ -407,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_places_are_never_candidates() {
+    fn protected_places_are_listed_but_locked() {
         use ferret_core::testing::{dir, file, index_from_specs};
         use ferret_core::ROOT_RECORD;
         let index = index_from_specs(vec![
@@ -417,23 +446,68 @@ mod tests {
             dir(32, 31, "Sessions"),
             file(33, 32, "Sessions.xml").sized(170 << 20),
             file(34, 32, "Sessions.back.xml").sized(170 << 20),
-            // What was just recycled as a duplicate is not a duplicate again.
-            dir(40, ROOT_RECORD, "$Recycle.Bin"),
-            dir(41, 40, "S-1-5-21-1002"),
-            file(42, 41, "$RK7W92H.jar").sized(30 << 20),
             dir(50, ROOT_RECORD, "Program Files"),
             file(51, 50, "asset.pak").sized(30 << 20),
             dir(60, ROOT_RECORD, "Users"),
             dir(61, 60, "pc"),
             dir(63, 61, "Downloads"),
             file(62, 63, "client.jar").sized(30 << 20),
-            // The launcher's own copy is application data, not a candidate.
+            // The launcher's own copy: shown, never ticked.
             dir(64, 61, ".minecraft"),
             file(65, 64, "1.21.jar").sized(30 << 20),
         ]);
         let tree = Tree::build(&index);
         let found = candidates(&index, &tree, 1 << 20, "pc");
-        let names: Vec<_> = found.iter().map(|c| index.name(c.node as usize)).collect();
-        assert_eq!(names, ["client.jar"]);
+        let removable: Vec<_> = found
+            .iter()
+            .filter(|c| c.removable)
+            .map(|c| index.name(c.node as usize))
+            .collect();
+        assert_eq!(removable, ["client.jar"]);
+        // Everything is still listed, so the waste can be seen.
+        assert_eq!(found.len(), 5);
+    }
+
+    #[test]
+    fn only_copies_that_may_go_count_as_reclaimable() {
+        let copy = |path: &str, removable: bool| Candidate {
+            node: 0,
+            path: path.to_string(),
+            size: 30 << 20,
+            removable,
+        };
+        // Windows' pair: real waste, none of it Burrow's to free.
+        let locked = Group {
+            size: 30 << 20,
+            files: vec![
+                copy(r"C:\Windows\servicing\Sessions\Sessions.xml", false),
+                copy(r"C:\Windows\servicing\Sessions\Sessions.back.xml", false),
+            ],
+        };
+        assert_eq!(locked.wasted(), 30 << 20);
+        assert_eq!(locked.reclaimable(), 0);
+        assert!(!locked.has_removable());
+
+        // One copy in Downloads, one the launcher keeps: only the first can go.
+        let mixed = Group {
+            size: 30 << 20,
+            files: vec![
+                copy(r"C:\Users\pc\Downloads\client.jar", true),
+                copy(r"C:\Users\pc\AppData\Roaming\.minecraft\1.21.jar", false),
+            ],
+        };
+        assert_eq!(mixed.reclaimable(), 30 << 20);
+
+        // Three of the person's own: two can go, the last one never.
+        let mine = Group {
+            size: 30 << 20,
+            files: vec![
+                copy(r"C:\Users\pc\Downloads\a.jar", true),
+                copy(r"C:\Users\pc\Documents\a.jar", true),
+                copy(r"C:\Users\pc\Desktop\a.jar", true),
+            ],
+        };
+        assert_eq!(mine.reclaimable(), 60 << 20);
+        assert_eq!(mine.reclaimable(), mine.wasted());
     }
 }

@@ -483,6 +483,40 @@ fn stale(
     out
 }
 
+/// Extensions that make a folder a program's folder rather than a pile of
+/// files: what Windows, Java or a shell would run.
+const RUNNABLE: &[&str] = &[
+    "exe", "dll", "sys", "msi", "jar", "bat", "cmd", "ps1", "so", "node", "pyd",
+];
+
+/// Folders people drop installers into. Having an .exe in them does not
+/// make them a program's folder.
+const DROP_FOLDERS: &[&str] = &[
+    "downloads",
+    "desktop",
+    "documents",
+    "pictures",
+    "videos",
+    "music",
+];
+
+/// Whether a folder is a program's: something runnable lies directly in it
+/// (Ghidra's `ghidraRun.bat`, a game's `.exe`, a library folder's `.jar`).
+/// Nothing below such a folder is picked off for being old — it is a whole
+/// that works together. Folders people drop installers into do not count.
+fn is_program_folder(index: &Index, tree: &Tree, folder: NodeId) -> bool {
+    let name = index.name(folder as usize).to_lowercase();
+    if DROP_FOLDERS.contains(&name.as_str()) || name.starts_with("onedrive") {
+        return false;
+    }
+    tree.children(folder).iter().any(|c| {
+        !tree.is_dir(*c) && {
+            let ext = crate::kinds::extension(index.name(*c as usize));
+            RUNNABLE.iter().any(|r| ext.eq_ignore_ascii_case(r))
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,38 +687,4 @@ mod tests {
             assert!(seen.insert(rule.id), "duplicate rule id {}", rule.id);
         }
     }
-}
-
-/// Extensions that make a folder a program's folder rather than a pile of
-/// files: what Windows, Java or a shell would run.
-const RUNNABLE: &[&str] = &[
-    "exe", "dll", "sys", "msi", "jar", "bat", "cmd", "ps1", "so", "node", "pyd",
-];
-
-/// Folders people drop installers into. Having an .exe in them does not
-/// make them a program's folder.
-const DROP_FOLDERS: &[&str] = &[
-    "downloads",
-    "desktop",
-    "documents",
-    "pictures",
-    "videos",
-    "music",
-];
-
-/// Whether a folder is a program's: something runnable lies directly in it
-/// (Ghidra's `ghidraRun.bat`, a game's `.exe`, a library folder's `.jar`).
-/// Nothing below such a folder is picked off for being old — it is a whole
-/// that works together. Folders people drop installers into do not count.
-fn is_program_folder(index: &Index, tree: &Tree, folder: NodeId) -> bool {
-    let name = index.name(folder as usize).to_lowercase();
-    if DROP_FOLDERS.contains(&name.as_str()) || name.starts_with("onedrive") {
-        return false;
-    }
-    tree.children(folder).iter().any(|c| {
-        !tree.is_dir(*c) && {
-            let ext = crate::kinds::extension(index.name(*c as usize));
-            RUNNABLE.iter().any(|r| ext.eq_ignore_ascii_case(r))
-        }
-    })
 }

@@ -55,7 +55,7 @@ pub fn list(letter: char) -> Vec<Saved> {
             (l == letter.to_ascii_uppercase()).then_some(Saved { path, taken, used })
         })
         .collect();
-    out.sort_by(|a, b| b.taken.cmp(&a.taken));
+    out.sort_by_key(|s| std::cmp::Reverse(s.taken));
     out
 }
 

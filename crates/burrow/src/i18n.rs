@@ -319,14 +319,30 @@ impl Lang {
         }
     }
 
-    pub fn dupes_summary(self, groups: usize, wasted: &str, seconds: f64) -> String {
+    /// What the search found: how much of the waste is Burrow's to free.
+    pub fn dupes_summary(self, groups: usize, reclaimable: &str, seconds: f64) -> String {
         let groups = self.number(groups as u64);
         match self {
+            Lang::Tr => {
+                format!("{groups} kopya grubu · {reclaimable} geri kazanılabilir · {seconds:.0} sn")
+            }
+            Lang::En => {
+                format!(
+                    "{groups} groups of duplicates · {reclaimable} reclaimable · {seconds:.0} s"
+                )
+            }
+        }
+    }
+
+    /// The rest: real waste, in places nothing here may touch.
+    pub fn dupes_locked(self, bytes: &str) -> String {
+        match self {
             Lang::Tr => format!(
-                "{groups} kopya grubu · {wasted} boşa · {} sn",
-                format!("{seconds:.0}")
+                "Ayrıca {bytes}, uygulamaların ve Windows'un kendi klasörlerinde duruyor.                  Oradan silinmez, çünkü uygulamalar dosyalarını tam o yollardan kullanır."
             ),
-            Lang::En => format!("{groups} groups of duplicates · {wasted} wasted · {seconds:.0} s"),
+            Lang::En => format!(
+                "Another {bytes} sits in applications' and Windows' own folders.                  It cannot go from here: those applications read their files from exactly those paths."
+            ),
         }
     }
 

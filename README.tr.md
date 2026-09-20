@@ -9,8 +9,6 @@ beri neyin büyüdüğünü gösterir.
 
 [English](README.md)
 
-![465 GB'lık bir sistem diskinde Burrow](docs/screenshot-tr.png)
-
 ## Neler yapar
 
 - **Saniyeler içinde tarar.** Klasörleri tek tek gezmek yerine (milyonlarca
@@ -37,13 +35,18 @@ beri neyin büyüdüğünü gösterir.
 - **Kopyalar.** İçeriği birebir aynı dosyalar bulunur. Önce boyutlar,
   sonra dosyaların ilk ve son 64 KB'ı, en son yalnızca hâlâ eşleşenlerin
   tamamı karşılaştırılır. Yalnızca bulutta duran dosyalar okunmaz, yani
-  indirilmez.
+  indirilmez. Bir uygulamanın veya Windows'un tam o yoldan kullandığı
+  kopyalar kilitli gösterilir: israf gerçektir ve görülmeye değer, ama
+  sizin silebileceğiniz bir şey olmadığı için geri kazanılabilir sayılmaz.
 - **Ne büyüdü?** Her taramadan sonra klasör boyutları kaydedilir. Eski bir
   kaydı bugünle karşılaştırın. Liste doğrudan büyümenin olduğu klasöre iner:
   `C:\Users` değil, içinde şişen klasör.
 - **Hiçbir şey kalıcı olarak silinmez.** Kaldırılan her şey, ne kadar ve ne
-  olduğunu söyleyen bir onaydan sonra Geri Dönüşüm Kutusu'na gider. Windows,
-  kurulu programlar ve sistem dosyaları Burrow'un içinden silinemez.
+  olduğunu söyleyen bir onaydan sonra Geri Dönüşüm Kutusu'na gider. Her
+  silme ile disk arasında tek bir güvenlik politikası durur ve worker son
+  anda bir kez daha sorar: Windows, kurulu programlar, başka kullanıcıların
+  dosyaları, profilin kendi iskeleti ve uygulama verileri buradan silinemez,
+  her ret nedeniyle birlikte söylenir.
 - Türkçe ve İngilizce, koyu ve açık tema.
 
 ## Ölçümler
@@ -58,7 +61,7 @@ bir NTFS sistem diskinde:
 | Bellek | 186 MB |
 | Rastgele 4.000 dosyada Windows'un bildirdiği boyutla birebir aynı | %100 |
 | Yeni 64 MB'lık bir dosyanın, yeniden taramadan haritaya girmesi | 2,2 sn |
-| 1 MB ve üstü dosyalarda kopya araması | 60 sn, 1.297 grup, 12,3 GB |
+| 1 MB ve üstü dosyalarda kopya araması | 14.783 dosya 11,5 sn'de: 400 grup, 3,2 GB israf |
 
 ## Çalıştırma
 

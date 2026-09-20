@@ -375,22 +375,28 @@ fn dupes(letter: char, min_size: u64, top: usize) -> Result<ExitCode, String> {
         }
     });
     let wasted: u64 = groups.iter().map(|g| g.wasted()).sum();
+    let reclaimable: u64 = groups.iter().map(|g| g.reclaimable()).sum();
     println!(
-        "\n{count} files of at least {} compared in {:.1}s: {} groups of duplicates, {} reclaimable",
+        "\n{count} files of at least {} compared in {:.1}s: {} groups, {} wasted, {} of it reclaimable",
         human_size(min_size),
         started.elapsed().as_secs_f64(),
         groups.len(),
-        human_size(wasted)
+        human_size(wasted),
+        human_size(reclaimable)
     );
     for group in groups.iter().take(top) {
         println!(
-            "\n  {} x {} = {} wasted",
+            "\n  {} x {} = {} wasted, {} reclaimable",
             group.files.len(),
             human_size(group.size),
-            human_size(group.wasted())
+            human_size(group.wasted()),
+            human_size(group.reclaimable())
         );
         for file in &group.files {
-            println!("     {}", file.path);
+            // A locked copy is one an application or Windows reads from
+            // that exact path.
+            let mark = if file.removable { " " } else { "L" };
+            println!("   {mark} {}", file.path);
         }
     }
     Ok(ExitCode::SUCCESS)

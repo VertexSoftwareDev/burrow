@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn spread_growth_keeps_the_parent() {
-        let old = snap(&[(r"C:\", 10 * GB), (r"C:\a", 1 * GB), (r"C:\b", 1 * GB)]);
+        let old = snap(&[(r"C:\", 10 * GB), (r"C:\a", GB), (r"C:\b", GB)]);
         let new = snap(&[(r"C:\", 12 * GB), (r"C:\a", 2 * GB), (r"C:\b", 2 * GB)]);
         let paths: Vec<_> = diff(&old, &new, MB).into_iter().map(|c| c.path).collect();
         assert!(paths.contains(&r"C:\".to_string()));

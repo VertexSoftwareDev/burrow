@@ -9,8 +9,6 @@ looked.
 
 [Türkçe](README.tr.md)
 
-![Burrow on a 465 GB system drive](docs/screenshot-en.png)
-
 ## What it does
 
 - **Scans in seconds.** Instead of walking directories — millions of system
@@ -35,13 +33,18 @@ looked.
   explaining itself.
 - **Duplicates.** Files with identical contents, found by comparing sizes
   first, then the first and last 64 KB, and only then whole files. Cloud-only
-  files are never read, so never downloaded.
+  files are never read, so never downloaded. Copies an application or Windows
+  reads from an exact path are shown locked: the waste is real and worth
+  seeing, but it is not yours to delete, so it is not counted as reclaimable.
 - **What grew.** Folder sizes are recorded after every scan. Compare any
   earlier record with today, and the list goes straight to the folder where
   the growth happened — not `C:\Users`, but the folder inside it that swelled.
 - **Nothing is deleted permanently.** Everything removed goes to the Recycle
-  Bin, after a confirmation that says how much and what. Windows, installed
-  programs and system files cannot be removed from inside Burrow.
+  Bin, after a confirmation that says how much and what. One safety policy
+  stands between every removal and the disk, and the worker asks it again at
+  the last moment: Windows, installed programs, other people's profiles, a
+  profile's own skeleton and applications' data cannot be removed from here,
+  each refusal saying why.
 - Turkish and English, dark and light.
 
 ## Measured
@@ -56,7 +59,7 @@ files and 294,000 folders:
 | Memory | 186 MB |
 | Sizes identical to what Windows reports, over 4,000 sampled files | 100 % |
 | A new 64 MB file on the map, without a rescan | 2.2 s |
-| Duplicates among files of 1 MB and more | 60 s, 1,297 groups, 12.3 GB |
+| Duplicates among files of 1 MB and more | 14,783 compared in 11.5 s: 400 groups, 3.2 GB wasted |
 
 ## Running it
 

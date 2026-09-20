@@ -159,6 +159,10 @@ impl DupesView {
     }
 }
 
+/// The kinds tab's answer for one folder: the scan generation and folder it
+/// was computed for, then the totals by kind and by extension.
+type KindsFor = (u64, NodeId, Vec<(Kind, Totals)>, Vec<(String, Totals)>);
+
 /// Something a view wants done. Collected while drawing — the views borrow
 /// the scan they draw — and carried out afterwards.
 enum Action {
@@ -211,7 +215,7 @@ pub struct DiskApp {
     menu_node: Option<NodeId>,
 
     largest: Option<(u64, Metric, Vec<NodeId>)>,
-    kinds: Option<(u64, NodeId, Vec<(Kind, Totals)>, Vec<(String, Totals)>)>,
+    kinds: Option<KindsFor>,
 
     dupes: DupesView,
     cleanup: CleanupView,
@@ -1488,16 +1492,28 @@ impl DiskApp {
                 }
                 Some((seconds, cancelled)) => {
                     let wasted: u64 = self.dupes.groups.iter().map(|g| g.wasted()).sum();
+                    let reclaimable: u64 = self.dupes.groups.iter().map(|g| g.reclaimable()).sum();
                     let text = if self.dupes.groups.is_empty() {
                         strings.dupes_none.to_string()
                     } else {
                         lang.dupes_summary(
                             self.dupes.groups.len(),
-                            &format::size(lang, wasted),
+                            &format::size(lang, reclaimable),
                             seconds,
                         )
                     };
                     ui.label(egui::RichText::new(text).strong());
+                    // The waste in places nothing here may touch is still
+                    // worth knowing about; it is just not a button.
+                    if wasted > reclaimable {
+                        ui.label(
+                            egui::RichText::new(
+                                lang.dupes_locked(&format::size(lang, wasted - reclaimable)),
+                            )
+                            .small()
+                            .color(palette.muted),
+                        );
+                    }
                     if cancelled {
                         ui.label(
                             egui::RichText::new(strings.dupes_cancelled)
@@ -1615,11 +1631,12 @@ impl DiskApp {
                                 );
                             });
                             table_row.col(|ui| {
-                                right_label(
-                                    ui,
-                                    &format::size(lang, group.wasted()),
-                                    palette.danger,
-                                );
+                                let (bytes, colour) = if group.has_removable() {
+                                    (group.reclaimable(), palette.danger)
+                                } else {
+                                    (group.wasted(), palette.muted)
+                                };
+                                right_label(ui, &format::size(lang, bytes), colour);
                             });
                             if table_row.response().clicked() {
                                 toggled = Some(g);
